@@ -155,7 +155,9 @@ function ConvertTo-HiList {
             $list.Add($item)
         }
     }
-    Write-Output -NoEnumerate -InputObject $list
+    # Windows PowerShell 5.1 returns $null from Write-Output -NoEnumerate
+    # when this list is empty. The unary comma returns the list itself.
+    return ,$list
 }
 
 function Get-HiChannelToken {

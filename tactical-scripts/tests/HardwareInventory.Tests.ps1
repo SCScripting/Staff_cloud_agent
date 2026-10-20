@@ -24,6 +24,19 @@ Describe 'Hardware inventory' {
         $parsed.note | Should -Match 'quote'
     }
 
+    It 'keeps an empty list under Windows PowerShell 5.1 output rules' {
+        $definition = (Get-Command -Name 'ConvertTo-HiList').Definition
+        $code = @($definition -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+        $code | Should -Not -Match 'Write-Output\s+-NoEnumerate'
+        $code | Should -Match 'return\s+,'
+        $list = ConvertTo-HiList
+        if ($code -match 'Write-Output\s+-NoEnumerate') {
+            $list = $null
+        }
+        { $list.Add([pscustomobject]@{ name = 'disk' }) } | Should -Not -Throw
+        $list.Count | Should -Be 1
+    }
+
     It 'describes memory channel layouts' {
         $dual = Get-HiMemoryLayout -Modules @(
             [pscustomobject]@{ DeviceLocator = 'ChannelA-DIMM0'; BankLabel = 'BANK 0'; CapacityBytes = 8GB }

@@ -200,6 +200,22 @@ class CollectTests(unittest.TestCase):
             self.assertIn("replacement_notes", texts)
             self.assertIn("Needs VGA output | Uses 2 monitors | Needs COM port", texts)
 
+    def test_form_factor_reads_powershell_property_case(self):
+        row = collector.flatten_survey(
+            {"agent_id": "a", "hostname": "SC-BLINK-TV04", "client": "c", "site": "s"},
+            {
+                "formFactor": {
+                    "Size": "Small",
+                    "Name": "Mini PC",
+                    "Detail": "Mini PC; model indicates Small",
+                }
+            },
+            "history",
+            "",
+        )
+        self.assertEqual(row["form_factor"], "Small")
+        self.assertEqual(row["form_detail"], "Mini PC; model indicates Small")
+
     def test_missing_history_stays_read_only_without_run(self):
         routes = dict(self.client_routes)
         routes[("GET", "/agents/scripthistory/")] = []

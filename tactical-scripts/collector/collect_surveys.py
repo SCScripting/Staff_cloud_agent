@@ -304,6 +304,19 @@ def _text(value):
     return str(value)
 
 
+def _value(mapping, key):
+    """Read a survey field by name. PowerShell property names may be Size or size."""
+    if not isinstance(mapping, dict) or key is None:
+        return None
+    if key in mapping:
+        return mapping[key]
+    wanted = str(key).casefold()
+    for name, value in mapping.items():
+        if str(name).casefold() == wanted:
+            return value
+    return None
+
+
 def _join(items, render):
     if isinstance(items, str):
         return items
@@ -362,8 +375,8 @@ def flatten_survey(agent, survey, source, history_time):
             "bios_date": _text(identity.get("biosDate")),
             "smbios_version": _text(identity.get("smbiosVersion")),
             "ship_date": _text(identity.get("shipDate")),
-            "form_factor": _text(form.get("size")),
-            "form_detail": _text(form.get("detail")),
+            "form_factor": _text(_value(form, "size")),
+            "form_detail": _text(_value(form, "detail")),
             "display_outputs": _text(display.get("reported")),
             "gpus": _join(
                 display.get("gpu"),

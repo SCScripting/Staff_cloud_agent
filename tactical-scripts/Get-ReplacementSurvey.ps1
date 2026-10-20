@@ -149,7 +149,10 @@ function ConvertTo-RsList {
             $list.Add($entry)
         }
     }
-    Write-Output -NoEnumerate -InputObject $list
+    # Windows PowerShell 5.1 returns $null from Write-Output -NoEnumerate
+    # when this list is empty, and the caller's .Add() then throws.
+    # The unary comma returns the list itself, empty or not.
+    return ,$list
 }
 
 function ConvertTo-RsChassisName {
@@ -194,7 +197,10 @@ function Get-RsModelChassisHint {
     if ([string]::IsNullOrWhiteSpace($Model)) {
         return $null
     }
-    if ($Model -match '(?i)\b(NUC|USFF|Micro|Tiny|Elite\s*Mini|ProDesk\s*Mini|ThinkCentre\s*Tiny|OptiPlex\s*Micro|Mini\s*PC)\b') {
+    if ($Model -match '(?i)\bMini\s*Tower\b') {
+        return 'Large'
+    }
+    if ($Model -match '(?i)(\bEQ\b|\bNUC\b|\bUSFF\b|\bMicro\b|\bTiny\b|\bMini\b|Elite\s*Mini|ProDesk\s*Mini|ThinkCentre\s*Tiny|OptiPlex\s*Micro|Mini\s*PC)') {
         return 'Small'
     }
     if ($Model -match '(?i)\b(SFF|Small\s*Form\s*Factor)\b') {
@@ -215,11 +221,40 @@ function Get-RsModelChassisHint {
     return $null
 }
 
+function Test-RsCompactChassis {
+    param(
+        $WidthInch,
+        $HeightInch,
+        $DepthInch
+    )
+
+    $width = 0.0
+    $height = 0.0
+    $depth = 0.0
+    $style = [System.Globalization.NumberStyles]::Float
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    $widthOk = [double]::TryParse([string]$WidthInch, $style, $culture, [ref]$width)
+    $heightOk = [double]::TryParse([string]$HeightInch, $style, $culture, [ref]$height)
+    $depthOk = [double]::TryParse([string]$DepthInch, $style, $culture, [ref]$depth)
+    if (-not $widthOk -or -not $heightOk -or -not $depthOk) {
+        return $false
+    }
+    if ($width -le 0 -or $height -le 0 -or $depth -le 0) {
+        return $false
+    }
+    # About 3.3 liters. A NUC or AZW EQ fits. An SFF desktop does not.
+    $volume = $width * $height * $depth
+    return ($volume -le 200)
+}
+
 function Get-RsFormFactor {
     param(
         $ChassisType,
         [string]$Model,
-        $PcSystemType
+        $PcSystemType,
+        $WidthInch,
+        $HeightInch,
+        $DepthInch
     )
 
     $chosen = $null
@@ -240,9 +275,20 @@ function Get-RsFormFactor {
     $size = [string]$chosen.Size
     $name = [string]$chosen.Name
     $fixed = @('Laptop', 'All-in-one', 'Rack server')
-    $hint = Get-RsModelChassisHint -Model $Model
+    $modelHint = Get-RsModelChassisHint -Model $Model
+    $dimensionHint = $null
+    if (Test-RsCompactChassis -WidthInch $WidthInch -HeightInch $HeightInch -DepthInch $DepthInch) {
+        $dimensionHint = 'Small'
+    }
+    $hint = $modelHint
+    if ([string]::IsNullOrWhiteSpace($hint)) {
+        $hint = $dimensionHint
+    }
     if ($fixed -notcontains $size -and -not [string]::IsNullOrWhiteSpace($hint)) {
         $size = $hint
+    }
+    if ($size -eq 'Small' -and @('Desktop', 'Unknown', 'Other') -contains $name) {
+        $name = 'Mini PC'
     }
     if ($size -eq 'Other' -and [string]$PcSystemType -eq '2') {
         $size = 'Laptop'
@@ -250,13 +296,15 @@ function Get-RsFormFactor {
     }
 
     $detail = $name
-    if (-not [string]::IsNullOrWhiteSpace($hint) -and $hint -eq $size -and $name -ne $size) {
-        $detail = '{0}; model indicates {1}' -f $name, $hint
+    if (-not [string]::IsNullOrWhiteSpace($modelHint) -and $modelHint -eq $size -and $name -ne $size) {
+        $detail = '{0}; model indicates {1}' -f $name, $modelHint
+    } elseif ([string]::IsNullOrWhiteSpace($modelHint) -and $dimensionHint -eq $size -and $name -ne $size) {
+        $detail = '{0}; dimensions indicate {1}' -f $name, $dimensionHint
     }
     return [pscustomobject]@{
-        Size   = $size
-        Name   = $name
-        Detail = $detail
+        size   = $size
+        name   = $name
+        detail = $detail
     }
 }
 
@@ -1024,7 +1072,7 @@ function Find-RsInstalledApp {
             }
         }
     }
-    Write-Output -NoEnumerate -InputObject $found
+    return ,$found
 }
 
 function Test-RsImagingLabel {
@@ -1178,7 +1226,6 @@ function Get-RsReplacementNote {
         [bool]$DedicatedGpu = $false,
         [bool]$ImagingSoftware = $false,
         [string]$FormFactor = '',
-        [bool]$Bluetooth = $false,
         [bool]$Thunderbolt = $false,
         [int]$BatteryHealth = -1
     )
@@ -1215,9 +1262,6 @@ function Get-RsReplacementNote {
         $notes.Add('Laptop')
     } elseif ($FormFactor -eq 'Rack server') {
         $notes.Add('Rack server')
-    }
-    if ($Bluetooth) {
-        $notes.Add('Needs Bluetooth')
     }
     if ($Thunderbolt) {
         $notes.Add('Has USB4 or Thunderbolt')
@@ -2069,7 +2113,7 @@ function Get-RsCollectedSurvey {
     $biosDate = 'n/a'
     $smbiosVersion = 'n/a'
     $shipDate = 'n/a'
-    $form = [pscustomobject]@{ Size = 'n/a'; Name = 'n/a'; Detail = 'n/a' }
+    $form = [pscustomobject]@{ size = 'n/a'; name = 'n/a'; detail = 'n/a' }
     try {
         $manufacturer = Format-RsText -Value (Get-RsProperty -Object $computer -Name 'Manufacturer')
         $model = Format-RsText -Value (Get-RsProperty -Object $computer -Name 'Model')
@@ -2090,7 +2134,7 @@ function Get-RsCollectedSurvey {
             }
         }
         $shipDate = Get-RsShipDateEstimate -Manufacturer $manufacturer -Serial $serial -BiosReleaseDate (Get-RsProperty -Object $bios -Name 'ReleaseDate') -Now $Now
-        $form = Get-RsFormFactor -ChassisType (Get-RsProperty -Object $enclosure -Name 'ChassisTypes') -Model $model -PcSystemType (Get-RsProperty -Object $computer -Name 'PCSystemType')
+        $form = Get-RsFormFactor -ChassisType (Get-RsProperty -Object $enclosure -Name 'ChassisTypes') -Model $model -PcSystemType (Get-RsProperty -Object $computer -Name 'PCSystemType') -WidthInch (Get-RsProperty -Object $enclosure -Name 'Width') -HeightInch (Get-RsProperty -Object $enclosure -Name 'Height') -DepthInch (Get-RsProperty -Object $enclosure -Name 'Depth')
     } catch {
         $problem.Add((Get-RsSectionError -Section 'identity' -ErrorRecord $_))
         $manufacturer = 'n/a'
@@ -2101,7 +2145,7 @@ function Get-RsCollectedSurvey {
         $biosDate = 'n/a'
         $smbiosVersion = 'n/a'
         $shipDate = 'n/a'
-        $form = [pscustomobject]@{ Size = 'n/a'; Name = 'n/a'; Detail = 'n/a' }
+        $form = [pscustomobject]@{ size = 'n/a'; name = 'n/a'; detail = 'n/a' }
     }
 
     $registryGpu = @()
@@ -2568,7 +2612,6 @@ function Get-RsCollectedSurvey {
     }
 
     $bluetoothText = 'n/a'
-    $bluetoothOn = $false
     try {
         $bluetoothText = 'none'
         foreach ($device in @(Get-RsCim -ClassName 'Win32_PnPEntity')) {
@@ -2590,7 +2633,6 @@ function Get-RsCollectedSurvey {
                 $state = 'radio off'
             } elseif ([string](Get-RsProperty -Object $device -Name 'Status') -eq 'OK') {
                 $state = 'radio on'
-                $bluetoothOn = $true
             }
             $bluetoothText = '{0} ({1})' -f (Format-RsText -Value $deviceName), $state
             break
@@ -2598,7 +2640,6 @@ function Get-RsCollectedSurvey {
     } catch {
         $problem.Add((Get-RsSectionError -Section 'bluetooth' -ErrorRecord $_))
         $bluetoothText = 'n/a'
-        $bluetoothOn = $false
     }
 
     $usbText = 'n/a'
@@ -2866,7 +2907,7 @@ function Get-RsCollectedSurvey {
         if ($null -ne $form) {
             $formSize = [string]$form.Size
         }
-        $notes = @(Get-RsReplacementNote -VideoOutput @($reportedNames) -ExternalMonitor $external -VgaConnected $vga -ComPort ($comNames.Count -gt 0) -Wifi ($wifiItems.Count -gt 0) -DedicatedGpu $dedicated -ImagingSoftware $imaging -FormFactor $formSize -Bluetooth $bluetoothOn -Thunderbolt $thunderbolt -BatteryHealth $batteryHealth)
+        $notes = @(Get-RsReplacementNote -VideoOutput @($reportedNames) -ExternalMonitor $external -VgaConnected $vga -ComPort ($comNames.Count -gt 0) -Wifi ($wifiItems.Count -gt 0) -DedicatedGpu $dedicated -ImagingSoftware $imaging -FormFactor $formSize -Thunderbolt $thunderbolt -BatteryHealth $batteryHealth)
     } catch {
         $problem.Add((Get-RsSectionError -Section 'notes' -ErrorRecord $_))
         $notes = @()

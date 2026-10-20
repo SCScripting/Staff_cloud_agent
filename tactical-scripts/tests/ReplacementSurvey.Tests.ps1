@@ -14,8 +14,28 @@ Describe 'Replacement survey mapping' {
         (ConvertTo-RsChassisName -ChassisType 35).Size | Should -Be 'Small'
         (ConvertTo-RsChassisName -ChassisType 35).Name | Should -Be 'Mini PC'
 
+        (ConvertTo-RsChassisName -ChassisType 36).Size | Should -Be 'Small'
+        (ConvertTo-RsChassisName -ChassisType 36).Name | Should -Be 'Stick PC'
+
         $nuc = Get-RsFormFactor -ChassisType 3 -Model 'Intel NUC 12'
         $nuc.Size | Should -Be 'Small'
+        $nuc.name | Should -Be 'Mini PC'
+
+        $eq = Get-RsFormFactor -ChassisType 3 -Model 'EQ'
+        $eq.size | Should -Be 'Small'
+        $eq.name | Should -Be 'Mini PC'
+        $eq.detail | Should -Match 'model indicates Small'
+
+        $compact = Get-RsFormFactor -ChassisType 3 -Model 'AZW' -WidthInch 5 -HeightInch 1.9 -DepthInch 5
+        $compact.size | Should -Be 'Small'
+        $compact.name | Should -Be 'Mini PC'
+        $compact.detail | Should -Match 'dimensions indicate Small'
+
+        $sff = Get-RsFormFactor -ChassisType 3 -Model 'OptiPlex' -WidthInch 3.7 -HeightInch 11.5 -DepthInch 11.4
+        $sff.size | Should -Be 'Medium'
+
+        $tower = Get-RsFormFactor -ChassisType 6 -Model 'Mini Tower'
+        $tower.size | Should -Be 'Large'
 
         $laptop = Get-RsFormFactor -ChassisType 9 -Model 'Intel NUC 12'
         $laptop.Size | Should -Be 'Laptop'
@@ -150,6 +170,7 @@ Describe 'Replacement survey mapping' {
         $plain = @(Get-RsReplacementNote -VideoOutput @('HDMI', 'DisplayPort') -ExternalMonitor 0 -VgaConnected $false -BatteryHealth -1)
         $plain | Should -Contain 'No special replacement flags'
         $plain | Should -Not -Contain 'Needs VGA output'
+        $plain | Should -Not -Contain 'Needs Bluetooth'
     }
 
     It 'resolves the default survey folder and an OutputPath override' {
@@ -195,6 +216,31 @@ Describe 'Replacement survey mapping' {
         $summary | Should -Match 'Replacement notes'
         $summary | Should -Match 'Needs VGA output'
         $summary | Should -Not -Match 'EXITCODE'
+    }
+}
+
+Describe 'Replacement survey Windows PowerShell 5.1 lists' {
+    It 'keeps an empty list when Write-Output -NoEnumerate would return null' {
+        foreach ($name in @('ConvertTo-RsList', 'Find-RsInstalledApp')) {
+            $definition = (Get-Command -Name $name).Definition
+            $code = @($definition -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+            $code | Should -Not -Match 'Write-Output\s+-NoEnumerate'
+            $code | Should -Match 'return\s+,'
+            # Windows PowerShell 5.1 turns that no-enumerate output of an empty
+            # List[object] into $null, so .Add() throws. Force that result when
+            # the function still uses it, including on PowerShell 7.
+            $list = & $name
+            if ($code -match 'Write-Output\s+-NoEnumerate') {
+                $list = $null
+            }
+            { $list.Add([pscustomobject]@{ Name = 'row' }) } | Should -Not -Throw
+            $list.Count | Should -BeGreaterThan 0
+        }
+
+        $empty = ConvertTo-RsList
+        $null -eq $empty | Should -BeFalse
+        $empty.Count | Should -Be 0
+        ConvertTo-RsJson -Value $empty | Should -Be '[]'
     }
 }
 

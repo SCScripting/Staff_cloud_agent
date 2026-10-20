@@ -119,7 +119,9 @@ Stdout is the full summary, then one compact JSON line, then `EXITCODE: N`. Tact
 
 `-OutputPath` overrides that location. A directory, including one with a trailing slash, keeps the default file names. A path that ends in `.json` or `.txt` uses that base name for both files.
 
-Ship dates from an HP serial, a Dell PPID, or the SMBIOS BIOS release date are labeled estimates. Lenovo serials are not decoded. GPU port counts taken from the model name are labeled estimated and are not treated as connected ports. A `Needs VGA output` note is set only when VGA is reported or a monitor is connected with VGA. `Uses N monitors` counts external monitors. `Dedicated GPU required (CBCT)` is set only when a dedicated GPU and imaging software are both present. Windows 11 readiness is informational and does not change the survey exit code.
+Ship dates from an HP serial, a Dell PPID, or the SMBIOS BIOS release date are labeled estimates. Lenovo serials are not decoded. GPU port counts taken from the model name are labeled estimated and are not treated as connected ports. A `Needs VGA output` note is set only when VGA is reported or a monitor is connected with VGA. `Uses N monitors` counts external monitors. `Dedicated GPU required (CBCT)` is set only when a dedicated GPU and imaging software are both present. A detected Bluetooth radio is listed under Network and is not a replacement note. Windows 11 readiness is informational and does not change the survey exit code.
+
+Form factor uses the chassis code first. Codes 35 and 36 are Mini PC and Stick PC. A desktop chassis becomes Small / Mini PC when the model is EQ, NUC, USFF, Micro, Tiny, or Mini (not Mini Tower), or when width, height, and depth are all present and the volume is 200 cubic inches or less. Lists returned to the caller use `return ,$list`. On Windows PowerShell 5.1, `Write-Output -NoEnumerate` of an empty `List[object]` is `$null`, and the next `.Add()` aborts that section.
 
 Each section (identity, GPU, monitors, CPU, memory, storage, network, Bluetooth, ports, printers, operating system, software, battery, and notes) has its own try/catch. A probe that throws records `n/a` for that section and adds a collection gap of the form `section: line N: message`, using the failing statement's line number. The rest of the survey still runs. A CIM class that returns nothing is `n/a` or `none` and is not a failure by itself.
 
@@ -148,7 +150,7 @@ python tactical-scripts/collector/collect_surveys.py --out ./surveys AGENTID1 AG
 
 `--client` accepts the client name or the numeric client id. Repeat `--agent` if you prefer flags to positional ids.
 
-The folder receives one JSON file per PC, plus `surveys.csv` and `surveys.xlsx`. Each spreadsheet row is one PC. Columns include identity, form factor, displays, CPU, RAM, disks, network, ports, dental software, and `replacement_notes`.
+The folder receives one JSON file per PC, plus `surveys.csv` and `surveys.xlsx`. Each spreadsheet row is one PC. Columns include identity, form factor, displays, CPU, RAM, disks, network, ports, dental software, and `replacement_notes`. `form_factor` reads `formFactor.size` or `formFactor.Size`, and `form_detail` reads `detail` or `Detail`.
 
 History is read with GET `/agents/scripthistory/?scriptname=Get-ReplacementSurvey`. Client and agent lookups use GET `/clients/`, GET `/agents/`, and GET `/agents/<agent_id>/`. The Script Manager name must match `--script-name` (default `Get-ReplacementSurvey`).
 
@@ -169,5 +171,5 @@ CI runs on Linux. It parses every script, runs PSScriptAnalyzer for errors, and 
 - HKLM uninstall entries and Vatech / Clever One service image paths
 - ADSI local-group enumeration, including orphaned SIDs and a renamed built-in Administrator
 - JSON field population from WMI on a physical dental PC
-- `Get-ReplacementSurvey.ps1` live WMI, EDID, display-config, and `C:\ProgramData\StandardComputer\Survey` writes. Chassis, port, serial-date, software, note, path, and JSON mapping are covered by Pester. Blank `WmiMonitorID` names and null CIM results are covered by Pester. A Windows PowerShell 5.1 SYSTEM run still needs a PC to confirm the process exit code Tactical records.
+- `Get-ReplacementSurvey.ps1` live WMI, EDID, display-config, and `C:\ProgramData\StandardComputer\Survey` writes. Chassis, port, serial-date, software, note, path, and JSON mapping are covered by Pester. A Windows PowerShell 5.1 SYSTEM run on SC-BLINK-TV04 returned EXITCODE 0 after the null-method fix, then recorded ten collection gaps because an empty list from `Write-Output -NoEnumerate` was `$null`. That empty-list rule is covered by Pester. Another SYSTEM run is still needed to confirm the gaps are gone and the EQ chassis is Small.
 - A live call from `collector/collect_surveys.py` to the Tactical API. Parsing, the GET-only path, the `--run` fallback, and the CSV/XLSX files are covered by `collector/test_collect_surveys.py`.

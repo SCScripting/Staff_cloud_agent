@@ -67,3 +67,9 @@ jobs:
           $config.Run.Exit = $true
           $config.Output.Verbosity = 'Detailed'
           Invoke-Pester -Configuration $config
+
+      - name: Survey collector tests
+        run: |
+          set -euo pipefail
+          python3 -m pip install -r tactical-scripts/collector/requirements.txt
+          python3 -m unittest discover -s tactical-scripts/collector -p 'test_*.py'

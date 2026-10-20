@@ -123,6 +123,37 @@ Ship dates from an HP serial, a Dell PPID, or the SMBIOS BIOS release date are l
 
 Exit `1` means the summary and JSON were still printed, but saving a file failed. Exit `2` means the host is not Windows, or both the computer and the operating system could not be read. Missing WMI values stay `n/a` and are listed as collection gaps; they still exit `0` when the files save.
 
+Name this script `Get-ReplacementSurvey` in Script Manager. The PC script does not contain an API key or any cloud address.
+
+### Collect surveys on the box
+
+`collector/collect_surveys.py` runs on the Standard Computer box. It reads the latest `Get-ReplacementSurvey` result from Tactical script history and writes files you can upload to OneDrive yourself. This tool does not upload anywhere.
+
+Install the only dependency, then set the API values in the environment. The key is sent as the `X-API-KEY` header and is not written into the PC script:
+
+```bash
+pip install -r tactical-scripts/collector/requirements.txt
+export TACTICAL_API_URL='https://api.standardcomputer.com'
+export TACTICAL_API_KEY='paste-the-key-here'
+```
+
+`TACTICAL_API_URL` defaults to `https://api.standardcomputer.com` when it is unset. Pass a client, or pass agent ids:
+
+```bash
+python tactical-scripts/collector/collect_surveys.py --client "Front Desk Dental" --out ./surveys
+python tactical-scripts/collector/collect_surveys.py --out ./surveys AGENTID1 AGENTID2
+```
+
+`--client` accepts the client name or the numeric client id. Repeat `--agent` if you prefer flags to positional ids.
+
+The folder receives one JSON file per PC, plus `surveys.csv` and `surveys.xlsx`. Each spreadsheet row is one PC. Columns include identity, form factor, displays, CPU, RAM, disks, network, ports, dental software, and `replacement_notes`.
+
+History is read with GET `/agents/scripthistory/?scriptname=Get-ReplacementSurvey`. Client and agent lookups use GET `/clients/`, GET `/agents/`, and GET `/agents/<agent_id>/`. The Script Manager name must match `--script-name` (default `Get-ReplacementSurvey`).
+
+`--run` is the only request that changes anything, and only for agents whose latest history has no survey JSON. It POSTs `/agents/<agent_id>/runscript/` for that script alone, with `output` set to `wait`, empty arguments, and `run_as_user` false. It does not reboot, shut down, run a command, or edit the agent. Omit `--run` and the tool stays on GET.
+
+Exit `0` means every matched agent was saved. Exit `1` means at least one agent had no usable survey; the other PCs are still written. Exit `2` means the key is missing, the client or script name was not found, or the API could not be read.
+
 ## Checks that could not be executed here
 
 CI runs on Linux. It parses every script, runs PSScriptAnalyzer for errors, and runs Pester against the decision logic (thresholds, CPU heuristic, VRAM registry selection, Office XML, imaging conflict, admin allow list, reboot signals, JSON shape). It does not have a Windows disk, TPM, Office Click-to-Run, Windows Update Agent, or Tactical agent. These paths still need a Windows 10/11 or Server machine:
@@ -137,3 +168,4 @@ CI runs on Linux. It parses every script, runs PSScriptAnalyzer for errors, and 
 - ADSI local-group enumeration, including orphaned SIDs and a renamed built-in Administrator
 - JSON field population from WMI on a physical dental PC
 - `Get-ReplacementSurvey.ps1` live WMI, EDID, display-config, and `C:\ProgramData\StandardComputer\Survey` writes. Chassis, port, serial-date, software, note, path, and JSON mapping are covered by Pester.
+- A live call from `collector/collect_surveys.py` to the Tactical API. Parsing, the GET-only path, the `--run` fallback, and the CSV/XLSX files are covered by `collector/test_collect_surveys.py`.

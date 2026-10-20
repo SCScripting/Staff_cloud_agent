@@ -197,3 +197,173 @@ Describe 'Replacement survey mapping' {
         $summary | Should -Not -Match 'EXITCODE'
     }
 }
+
+Describe 'Replacement survey null probes' {
+    BeforeAll {
+        if (-not (Get-Command -Name 'Get-CimInstance' -ErrorAction SilentlyContinue)) {
+            function script:Get-CimInstance {
+                [CmdletBinding()]
+                param(
+                    [string]$ClassName,
+                    [string]$Namespace
+                )
+
+                # Linux CI has no CIM cmdlet. Tests mock this stub. The parameters
+                # stay in the signature so the mock can filter on ClassName.
+                if ([string]::IsNullOrWhiteSpace($ClassName) -and [string]::IsNullOrWhiteSpace($Namespace)) {
+                    return $null
+                }
+                return $null
+            }
+        }
+    }
+
+    It 'turns a blank WMI monitor name into an empty string' {
+        ConvertTo-RsAsciiWord -Value $null | Should -Be ''
+        ConvertTo-RsAsciiWord -Value ([uint16[]]@(0, 0, 0)) | Should -Be ''
+        ConvertTo-RsAsciiWord -Value ([uint16[]]@(65, 85, 79, 0, 0)) | Should -Be 'AUO'
+        (Get-RsSectionError -Section 'monitors' -ErrorRecord $null) | Should -Be 'monitors: line 0: n/a'
+    }
+
+    It 'keeps collecting when CIM results are null and a monitor name is blank' {
+        Mock Get-CimInstance -MockWith {
+            param($ClassName)
+            switch ($ClassName) {
+                'Win32_ComputerSystem' {
+                    return [pscustomobject]@{
+                        Manufacturer        = 'HP'
+                        Model               = 'HP EliteDesk 800 G6'
+                        SystemSKUNumber     = 'SKU1'
+                        PCSystemType        = 1
+                        TotalPhysicalMemory = 17179869184
+                        PartOfDomain        = $false
+                        Workgroup           = 'WORKGROUP'
+                        Domain              = 'WORKGROUP'
+                    }
+                }
+                'Win32_BIOS' {
+                    return [pscustomobject]@{
+                        SerialNumber       = 'CND3480XYZ'
+                        SMBIOSBIOSVersion  = 'R01'
+                        ReleaseDate        = '2024-05-01'
+                        SMBIOSMajorVersion = 3
+                        SMBIOSMinorVersion = 2
+                    }
+                }
+                'Win32_SystemEnclosure' {
+                    return [pscustomobject]@{
+                        ChassisTypes = 3
+                        SerialNumber = 'CND3480XYZ'
+                    }
+                }
+                'Win32_OperatingSystem' {
+                    return [pscustomobject]@{
+                        Caption      = 'Microsoft Windows 11 Pro'
+                        BuildNumber  = '26100'
+                        ProductType  = 1
+                    }
+                }
+                'Win32_VideoController' {
+                    return [pscustomobject]@{
+                        Name        = 'Intel(R) UHD Graphics 770'
+                        PNPDeviceID = $null
+                    }
+                }
+                'WmiMonitorID' {
+                    return [pscustomobject]@{
+                        Active             = $true
+                        InstanceName       = 'DISPLAY\AUO1234\5&123_0'
+                        ManufacturerName   = [uint16[]]@(65, 85, 79, 0)
+                        UserFriendlyName   = [uint16[]]@(0, 0, 0)
+                        ProductCodeID      = [uint16[]]@(0, 0)
+                        SerialNumberID     = [uint16[]]@(0, 0)
+                        YearOfManufacture  = 0
+                    }
+                }
+                default {
+                    return $null
+                }
+            }
+        }
+
+        $survey = Get-RsCollectedSurvey -Now (Get-Date -Year 2026 -Month 10 -Day 20)
+        $survey | Should -Not -BeNullOrEmpty
+        $survey.result | Should -Be 'Pass'
+        $survey.identity.manufacturer | Should -Be 'HP'
+        $survey.monitor.count | Should -Be 1
+
+        $model = 'missing'
+        $make = 'missing'
+        foreach ($item in $survey.monitor.item) {
+            $model = [string]$item.model
+            $make = [string]$item.make
+        }
+        $model | Should -Be 'n/a'
+        $make | Should -Be 'AUO'
+
+        $gpuName = 'missing'
+        foreach ($gpu in $survey.display.gpu) {
+            $gpuName = [string]$gpu.name
+        }
+        $gpuName | Should -Be 'Intel(R) UHD Graphics 770'
+
+        $gpuProblem = @($survey.problem | Where-Object { $_ -like 'gpu: line *' })
+        $gpuProblem.Count | Should -BeGreaterThan 0
+        $gpuProblem[0] | Should -Match '^gpu: line [0-9]+: .+'
+    }
+
+    It 'records the section name and line when one probe throws' {
+        Mock Get-CimInstance -MockWith {
+            param($ClassName)
+            switch ($ClassName) {
+                'Win32_ComputerSystem' {
+                    return [pscustomobject]@{
+                        Manufacturer = 'Dell Inc.'
+                        Model        = 'OptiPlex 7080'
+                        PCSystemType = 1
+                        PartOfDomain = $false
+                        Workgroup    = 'WORKGROUP'
+                    }
+                }
+                'Win32_OperatingSystem' {
+                    return [pscustomobject]@{
+                        Caption     = 'Microsoft Windows 10 Pro'
+                        BuildNumber = '19045'
+                        ProductType = 1
+                    }
+                }
+                'Win32_Printer' {
+                    return [pscustomobject]@{
+                        Name     = 'Front Desk Laser'
+                        PortName = 'USB001'
+                        Network  = $false
+                    }
+                }
+                default {
+                    return $null
+                }
+            }
+        }
+        Mock Get-RsPrinterKind { throw 'printer method failed' }
+
+        $survey = Get-RsCollectedSurvey -Now (Get-Date -Year 2026 -Month 10 -Day 20)
+        $survey | Should -Not -BeNullOrEmpty
+        $survey.identity.model | Should -Be 'OptiPlex 7080'
+        $printerCount = 0
+        foreach ($printer in $survey.printer) {
+            $printerCount++
+        }
+        $printerCount | Should -Be 0
+        $printerProblem = @($survey.problem | Where-Object { $_ -like 'printers: line *printer method failed*' })
+        $printerProblem.Count | Should -Be 1
+        $printerProblem[0] | Should -Match '^printers: line [0-9]+: printer method failed'
+    }
+
+    It 'prints EXITCODE and exits with that same code' {
+        $path = Join-Path $PSScriptRoot '../Get-ReplacementSurvey.ps1'
+        $content = Get-Content -LiteralPath $path -Raw
+        $content | Should -Match '\$code = \[int\]\$script:ScExitCode'
+        $content | Should -Match 'SetShouldExit\(\$code\)'
+        $content | Should -Match 'exit \$code'
+    }
+}

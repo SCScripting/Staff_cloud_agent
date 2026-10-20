@@ -121,7 +121,9 @@ Stdout is the full summary, then one compact JSON line, then `EXITCODE: N`. Tact
 
 Ship dates from an HP serial, a Dell PPID, or the SMBIOS BIOS release date are labeled estimates. Lenovo serials are not decoded. GPU port counts taken from the model name are labeled estimated and are not treated as connected ports. A `Needs VGA output` note is set only when VGA is reported or a monitor is connected with VGA. `Uses N monitors` counts external monitors. `Dedicated GPU required (CBCT)` is set only when a dedicated GPU and imaging software are both present. Windows 11 readiness is informational and does not change the survey exit code.
 
-Exit `1` means the summary and JSON were still printed, but saving a file failed. Exit `2` means the host is not Windows, or both the computer and the operating system could not be read. Missing WMI values stay `n/a` and are listed as collection gaps; they still exit `0` when the files save.
+Each section (identity, GPU, monitors, CPU, memory, storage, network, Bluetooth, ports, printers, operating system, software, battery, and notes) has its own try/catch. A probe that throws records `n/a` for that section and adds a collection gap of the form `section: line N: message`, using the failing statement's line number. The rest of the survey still runs. A CIM class that returns nothing is `n/a` or `none` and is not a failure by itself.
+
+Exit `1` means the summary and JSON were still printed, but saving a file failed. Exit `2` means the host is not Windows, or both the computer and the operating system could not be read. Missing WMI values stay `n/a` and are listed as collection gaps; they still exit `0` when the files save. The process exit code is the same number as the `EXITCODE` line. The script clears the error list and calls `SetShouldExit` before `exit $code`, because a caught error left in the session makes Windows PowerShell report exit code 1 to Tactical.
 
 Name this script `Get-ReplacementSurvey` in Script Manager. The PC script does not contain an API key or any cloud address.
 
@@ -167,5 +169,5 @@ CI runs on Linux. It parses every script, runs PSScriptAnalyzer for errors, and 
 - HKLM uninstall entries and Vatech / Clever One service image paths
 - ADSI local-group enumeration, including orphaned SIDs and a renamed built-in Administrator
 - JSON field population from WMI on a physical dental PC
-- `Get-ReplacementSurvey.ps1` live WMI, EDID, display-config, and `C:\ProgramData\StandardComputer\Survey` writes. Chassis, port, serial-date, software, note, path, and JSON mapping are covered by Pester.
+- `Get-ReplacementSurvey.ps1` live WMI, EDID, display-config, and `C:\ProgramData\StandardComputer\Survey` writes. Chassis, port, serial-date, software, note, path, and JSON mapping are covered by Pester. Blank `WmiMonitorID` names and null CIM results are covered by Pester. A Windows PowerShell 5.1 SYSTEM run still needs a PC to confirm the process exit code Tactical records.
 - A live call from `collector/collect_surveys.py` to the Tactical API. Parsing, the GET-only path, the `--run` fallback, and the CSV/XLSX files are covered by `collector/test_collect_surveys.py`.

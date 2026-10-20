@@ -16,7 +16,9 @@
 .NOTES
     Standard Computer Tactical RMM script. Windows PowerShell 5.1. Run as SYSTEM.
     Idempotent. Does not reboot and does not restart services.
-    Does not use credentials. The Windows Update search can take several
+    Does not use credentials. A missing text value prints as n/a.
+    The last stdout line is EXITCODE: N. Tactical ad-hoc command output does
+    not show the process exit code. The Windows Update search can take several
     minutes and uses the PC's configured source (Windows Update or WSUS).
     Set the Tactical timeout to at least 20 minutes.
 
@@ -58,6 +60,19 @@ function Write-WuResult {
 
     Write-Output ('RESULT: {0}' -f $Result)
     Write-Output ('Summary: {0}' -f $Summary)
+}
+
+function Format-WuText {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'n/a'
+    }
+    return $text
 }
 
 function Test-WuDefinitionUpdate {
@@ -265,7 +280,7 @@ function Invoke-WuMain {
             Write-Output 'Last successful quality install: unknown'
         } else {
             Write-Output ('Last successful quality install: {0}' -f $last.Date.ToString('yyyy-MM-dd HH:mm:ss'))
-            Write-Output ('Last install title: {0}' -f $last.Title)
+            Write-Output ('Last install title: {0}' -f (Format-WuText -Value $last.Title))
         }
 
         $searchOk = $true
@@ -302,7 +317,7 @@ function Invoke-WuMain {
             if ($shown -ge 20) {
                 break
             }
-            Write-Output ('  - {0}' -f $title)
+            Write-Output ('  - {0}' -f (Format-WuText -Value $title))
             $shown++
         }
         if ($pendingTitles.Count -gt 20) {
@@ -340,5 +355,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Output ('Summary: {0}' -f $_.Exception.Message) | Out-Host
         $script:ScExitCode = 2
     }
+    Write-Output ('EXITCODE: {0}' -f $script:ScExitCode) | Out-Host
     exit $script:ScExitCode
 }

@@ -14,7 +14,10 @@
 .NOTES
     Standard Computer Tactical RMM script. Windows PowerShell 5.1. Run as SYSTEM.
     Idempotent. Does not reboot and does not restart services.
-    Does not use credentials.
+    Does not use credentials. Blank text fields print as n/a. Wear and
+    power-on hours of 0 stay JSON null because Windows uses 0 when a drive
+    does not report them. The last stdout line is EXITCODE: N. Tactical
+    ad-hoc command output does not show the process exit code.
 
     Exit codes:
       0  Inventory was collected, including model and serial number.
@@ -57,6 +60,49 @@ function Format-HiTrim {
         return ''
     }
     return ([string]$Value).Trim()
+}
+
+function Format-HiText {
+    param($Value)
+
+    $text = Format-HiTrim -Value $Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'n/a'
+    }
+    return $text
+}
+
+function Format-HiSerial {
+    param($Value)
+
+    $text = Format-HiTrim -Value $Value
+    $text = ($text -replace '[\s\.]+$', '').Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return ''
+    }
+    return $text
+}
+
+function ConvertTo-HiReportedCount {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    $text = Format-HiTrim -Value $Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+    $number = 0.0
+    $style = [System.Globalization.NumberStyles]::Float
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    if (-not [double]::TryParse($text, $style, $culture, [ref]$number)) {
+        return $null
+    }
+    if ($number -le 0) {
+        return $null
+    }
+    return $number
 }
 
 function Format-HiGb {
@@ -515,12 +561,12 @@ function Get-HiGpuRecord {
             $vramGb = Format-HiGb -Bytes $bytes
         }
         $records.Add([pscustomobject]@{
-            name          = $name
-            pnpDeviceId   = $pnp
+            name          = (Format-HiText -Value $name)
+            pnpDeviceId   = (Format-HiText -Value $pnp)
             dedicated     = (Test-HiDedicatedGpu -Name $name -PnpDeviceId $pnp)
             vramGB        = $vramGb
-            vramSource    = $source
-            driverVersion = [string]$controller.DriverVersion
+            vramSource    = (Format-HiText -Value $source)
+            driverVersion = (Format-HiText -Value $controller.DriverVersion)
         })
     }
     return $records
@@ -544,16 +590,16 @@ function Get-HiDiskRecord {
                 $wear = $counter.Wear
             }
             $records.Add([pscustomobject]@{
-                friendlyName  = Format-HiTrim -Value $disk.FriendlyName
-                model         = Format-HiTrim -Value $disk.Model
-                serialNumber  = Format-HiTrim -Value $disk.SerialNumber
+                friendlyName  = Format-HiText -Value $disk.FriendlyName
+                model         = Format-HiText -Value $disk.Model
+                serialNumber  = Format-HiText -Value (Format-HiSerial -Value $disk.SerialNumber)
                 sizeGB        = Format-HiGb -Bytes $disk.Size
-                mediaType     = [string]$disk.MediaType
-                busType       = [string]$disk.BusType
-                healthStatus  = [string]$disk.HealthStatus
-                firmware      = Format-HiTrim -Value $disk.FirmwareVersion
-                powerOnHours  = $powerOn
-                wearPercent   = $wear
+                mediaType     = Format-HiText -Value $disk.MediaType
+                busType       = Format-HiText -Value $disk.BusType
+                healthStatus  = Format-HiText -Value $disk.HealthStatus
+                firmware      = Format-HiText -Value $disk.FirmwareVersion
+                powerOnHours  = ConvertTo-HiReportedCount -Value $powerOn
+                wearPercent   = ConvertTo-HiReportedCount -Value $wear
             })
         }
         return $records
@@ -561,14 +607,14 @@ function Get-HiDiskRecord {
 
     foreach ($disk in @(Get-CimInstance -ClassName Win32_DiskDrive -ErrorAction Stop)) {
         $records.Add([pscustomobject]@{
-            friendlyName = Format-HiTrim -Value $disk.Caption
-            model        = Format-HiTrim -Value $disk.Model
-            serialNumber = Format-HiTrim -Value $disk.SerialNumber
+            friendlyName = Format-HiText -Value $disk.Caption
+            model        = Format-HiText -Value $disk.Model
+            serialNumber = Format-HiText -Value (Format-HiSerial -Value $disk.SerialNumber)
             sizeGB       = Format-HiGb -Bytes $disk.Size
-            mediaType    = [string]$disk.MediaType
-            busType      = [string]$disk.InterfaceType
-            healthStatus = [string]$disk.Status
-            firmware     = Format-HiTrim -Value $disk.FirmwareRevision
+            mediaType    = Format-HiText -Value $disk.MediaType
+            busType      = Format-HiText -Value $disk.InterfaceType
+            healthStatus = Format-HiText -Value $disk.Status
+            firmware     = Format-HiText -Value $disk.FirmwareRevision
             powerOnHours = $null
             wearPercent  = $null
         })
@@ -642,15 +688,15 @@ function Invoke-HiMain {
                 $configured = $configuredProperty.Value
             }
             $moduleRecords.Add([pscustomobject]@{
-                bankLabel     = Format-HiTrim -Value $module.BankLabel
-                deviceLocator = Format-HiTrim -Value $module.DeviceLocator
+                bankLabel     = Format-HiText -Value $module.BankLabel
+                deviceLocator = Format-HiText -Value $module.DeviceLocator
                 capacityGB    = Format-HiGb -Bytes $module.Capacity
                 speedMHz      = $module.Speed
                 configuredMHz = $configured
-                manufacturer  = Format-HiTrim -Value $module.Manufacturer
-                partNumber    = Format-HiTrim -Value $module.PartNumber
-                serialNumber  = Format-HiTrim -Value $module.SerialNumber
-                formFactor    = Format-HiFormFactor -Value $module.FormFactor
+                manufacturer  = Format-HiText -Value $module.Manufacturer
+                partNumber    = Format-HiText -Value $module.PartNumber
+                serialNumber  = Format-HiText -Value (Format-HiSerial -Value $module.SerialNumber)
+                formFactor    = Format-HiText -Value (Format-HiFormFactor -Value $module.FormFactor)
             })
         }
 
@@ -705,7 +751,7 @@ function Invoke-HiMain {
             $manufacturer = Format-HiTrim -Value $computer.Manufacturer
         }
         if ($null -ne $bios) {
-            $serial = Format-HiTrim -Value $bios.SerialNumber
+            $serial = Format-HiSerial -Value $bios.SerialNumber
         }
         $asset = ''
         if ($null -ne $enclosure) {
@@ -783,31 +829,31 @@ function Invoke-HiMain {
             summary        = $summary
             collectedAtUtc = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
             computer       = [pscustomobject]@{
-                name         = [string]$env:COMPUTERNAME
-                manufacturer = $manufacturer
-                model        = $model
-                family       = $family
-                sku          = $sku
-                domain       = $domain
+                name         = (Format-HiText -Value $env:COMPUTERNAME)
+                manufacturer = (Format-HiText -Value $manufacturer)
+                model        = (Format-HiText -Value $model)
+                family       = (Format-HiText -Value $family)
+                sku          = (Format-HiText -Value $sku)
+                domain       = (Format-HiText -Value $domain)
                 partOfDomain = $domainJoined
             }
             warranty       = [pscustomobject]@{
-                manufacturer          = $manufacturer
-                model                 = $model
-                systemSku             = $sku
-                serialNumber          = $serial
-                assetTag              = $asset
-                biosVersion           = $(if ($null -eq $bios) { '' } else { Format-HiTrim -Value $bios.SMBIOSBIOSVersion })
+                manufacturer          = (Format-HiText -Value $manufacturer)
+                model                 = (Format-HiText -Value $model)
+                systemSku             = (Format-HiText -Value $sku)
+                serialNumber          = (Format-HiText -Value $serial)
+                assetTag              = (Format-HiText -Value $asset)
+                biosVersion           = $(if ($null -eq $bios) { 'n/a' } else { Format-HiText -Value $bios.SMBIOSBIOSVersion })
                 biosReleaseDate       = $(if ($null -eq $bios) { $null } else { Format-HiTimestamp -Value $bios.ReleaseDate })
-                baseboardManufacturer = $boardMaker
-                baseboardProduct      = $boardProduct
-                baseboardSerial       = $boardSerial
-                uuid                  = $uuid
+                baseboardManufacturer = (Format-HiText -Value $boardMaker)
+                baseboardProduct      = (Format-HiText -Value $boardProduct)
+                baseboardSerial       = (Format-HiText -Value (Format-HiSerial -Value $boardSerial))
+                uuid                  = (Format-HiText -Value $uuid)
                 note                  = 'Identifiers only. Warranty status is not queried because vendor APIs need per-client credentials.'
             }
             cpu            = [pscustomobject]@{
-                name               = $cpuName
-                manufacturer       = $cpuVendor
+                name               = (Format-HiText -Value $cpuName)
+                manufacturer       = (Format-HiText -Value $cpuVendor)
                 cores              = $cores
                 logicalProcessors  = $logical
                 maxClockMHz        = $clock
@@ -825,14 +871,14 @@ function Invoke-HiMain {
             gpus           = $gpuRecords
             disks          = $diskRecords
             os             = [pscustomobject]@{
-                caption        = $osCaption
-                version        = $osVersion
-                build          = $osBuild
-                ubr            = $ubr
-                displayVersion = $displayVersion
-                architecture   = $osArch
+                caption        = (Format-HiText -Value $osCaption)
+                version        = (Format-HiText -Value $osVersion)
+                build          = (Format-HiText -Value $osBuild)
+                ubr            = (Format-HiText -Value $ubr)
+                displayVersion = (Format-HiText -Value $displayVersion)
+                architecture   = (Format-HiText -Value $osArch)
                 installDate    = $installDate
-                productType    = $productType
+                productType    = (Format-HiText -Value $productType)
             }
             errors         = (ConvertTo-HiList -Items @($errors))
         }
@@ -854,5 +900,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Output ('Summary: {0}' -f $_.Exception.Message) | Out-Host
         $script:ScExitCode = 2
     }
+    Write-Output ('EXITCODE: {0}' -f $script:ScExitCode) | Out-Host
     exit $script:ScExitCode
 }

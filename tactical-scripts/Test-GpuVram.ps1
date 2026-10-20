@@ -20,7 +20,9 @@
 .NOTES
     Standard Computer Tactical RMM script. Windows PowerShell 5.1. Run as SYSTEM.
     Idempotent. Does not reboot and does not restart services.
-    Does not use credentials.
+    Does not use credentials. A missing text value prints as n/a.
+    The last stdout line is EXITCODE: N. Tactical ad-hoc command output does
+    not show the process exit code.
 
     Exit codes:
       0  A dedicated GPU meets the VRAM minimum.
@@ -57,6 +59,19 @@ function Write-GvResult {
 
     Write-Output ('RESULT: {0}' -f $Result)
     Write-Output ('Summary: {0}' -f $Summary)
+}
+
+function Format-GvText {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'n/a'
+    }
+    return $text
 }
 
 function Get-GvQwMemorySize {
@@ -325,7 +340,7 @@ function Invoke-GvMain {
             if ([string]::IsNullOrWhiteSpace([string]$source)) {
                 $source = 'not found'
             }
-            Write-Output ('{0} | {1} | {2} GB | source {3} | driver {4} | {5}' -f $adapter.Name, $kind, $check.VramGB, $source, $adapter.DriverVersion, $adapter.PnpDeviceId)
+            Write-Output ('{0} | {1} | {2} GB | source {3} | driver {4} | {5}' -f (Format-GvText -Value $adapter.Name), $kind, $check.VramGB, (Format-GvText -Value $source), (Format-GvText -Value $adapter.DriverVersion), (Format-GvText -Value $adapter.PnpDeviceId))
         }
 
         $decision = Get-GvVramDecision -Adapters $adapters -MinVRAMGB $MinVRAMGB
@@ -347,5 +362,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Output ('Summary: {0}' -f $_.Exception.Message) | Out-Host
         $script:ScExitCode = 2
     }
+    Write-Output ('EXITCODE: {0}' -f $script:ScExitCode) | Out-Host
     exit $script:ScExitCode
 }

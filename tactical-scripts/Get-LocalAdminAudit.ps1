@@ -18,7 +18,9 @@
 .NOTES
     Standard Computer Tactical RMM script. Windows PowerShell 5.1. Run as SYSTEM.
     Idempotent. Does not reboot, remove members, or restart services.
-    Does not use credentials.
+    Does not use credentials. A missing text value prints as n/a.
+    The last stdout line is EXITCODE: N. Tactical ad-hoc command output does
+    not show the process exit code.
 
     Exit codes:
       0  Every member is expected.
@@ -57,6 +59,19 @@ function Write-LaResult {
 
     Write-Output ('RESULT: {0}' -f $Result)
     Write-Output ('Summary: {0}' -f $Summary)
+}
+
+function Format-LaText {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'n/a'
+    }
+    return $text
 }
 
 function Test-LaNameMatch {
@@ -355,7 +370,7 @@ function Invoke-LaMain {
             if ($row.Expected) {
                 $expected = 'Yes'
             }
-            $line = '  {0}  SID {1}  {2}  {3}  expected {4}' -f $row.Name, $row.Sid, $row.Class, $row.Account, $expected
+            $line = '  {0}  SID {1}  {2}  {3}  expected {4}' -f (Format-LaText -Value $row.Name), (Format-LaText -Value $row.Sid), (Format-LaText -Value $row.Class), (Format-LaText -Value $row.Account), $expected
             if (-not [string]::IsNullOrWhiteSpace([string]$row.Note)) {
                 $line = '{0}  {1}' -f $line, $row.Note
             }
@@ -379,5 +394,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Output ('Summary: {0}' -f $_.Exception.Message) | Out-Host
         $script:ScExitCode = 2
     }
+    Write-Output ('EXITCODE: {0}' -f $script:ScExitCode) | Out-Host
     exit $script:ScExitCode
 }

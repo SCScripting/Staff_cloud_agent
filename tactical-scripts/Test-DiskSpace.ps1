@@ -24,6 +24,9 @@
 .NOTES
     Standard Computer Tactical RMM script. Windows PowerShell 5.1. Run as SYSTEM.
     Idempotent. Does not reboot. Does not use credentials.
+    A missing text value prints as n/a.
+    The last stdout line is EXITCODE: N. Tactical ad-hoc command output does
+    not show the process exit code.
 
     Exit codes:
       0  Every selected volume is at or above the free-space threshold.
@@ -72,6 +75,19 @@ function Write-DsResult {
 
     Write-Output ('RESULT: {0}' -f $Result)
     Write-Output ('Summary: {0}' -f $Summary)
+}
+
+function Format-DsText {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'n/a'
+    }
+    return $text
 }
 
 function ConvertTo-DsByte {
@@ -308,7 +324,7 @@ function Write-DsVolumeReport {
             }
         }
         $percentText = $check.FreePercent.ToString([System.Globalization.CultureInfo]::InvariantCulture)
-        Write-Output ('{0}  size {1} GB  free {2} GB  free {3}%  {4}' -f $deviceId, (Format-DsGb -Bytes $size), (Format-DsGb -Bytes $free), $percentText, $state)
+        Write-Output ('{0}  size {1} GB  free {2} GB  free {3}%  {4}' -f (Format-DsText -Value $deviceId), (Format-DsGb -Bytes $size), (Format-DsGb -Bytes $free), $percentText, $state)
     }
     [pscustomobject]@{
         Selected = $selected
@@ -453,5 +469,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Output ('Summary: {0}' -f $_.Exception.Message) | Out-Host
         $script:ScExitCode = 2
     }
+    Write-Output ('EXITCODE: {0}' -f $script:ScExitCode) | Out-Host
     exit $script:ScExitCode
 }

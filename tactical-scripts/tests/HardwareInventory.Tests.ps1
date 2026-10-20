@@ -55,4 +55,16 @@ Describe 'Hardware inventory' {
         Test-HiDedicatedGpu -Name 'NVIDIA GeForce RTX 3060' -PnpDeviceId 'PCI\VEN_10DE&DEV_2504' | Should -BeTrue
         Test-HiDedicatedGpu -Name 'Intel(R) UHD Graphics 630' -PnpDeviceId 'PCI\VEN_8086&DEV_3E92' | Should -BeFalse
     }
+
+    It 'prints blank text as n/a and treats zero wear as unreported' {
+        Format-HiText -Value $null | Should -Be 'n/a'
+        Format-HiText -Value '   ' | Should -Be 'n/a'
+        Format-HiText -Value 'OptiPlex' | Should -Be 'OptiPlex'
+        Format-HiSerial -Value 'CT500P3SSD8. ' | Should -Be 'CT500P3SSD8'
+        Format-HiSerial -Value '...' | Should -Be ''
+        Format-HiText -Value (Format-HiSerial -Value '...') | Should -Be 'n/a'
+        ConvertTo-HiReportedCount -Value 0 | Should -BeNullOrEmpty
+        ConvertTo-HiReportedCount -Value $null | Should -BeNullOrEmpty
+        ConvertTo-HiReportedCount -Value 12 | Should -Be 12
+    }
 }

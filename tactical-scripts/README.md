@@ -7,6 +7,8 @@ Each script is self-contained. Paste one file into Script Manager. Do not expect
 Safety rules for every script:
 
 - Exit `0` when the check passes. Exit non-zero when it fails or cannot run. Tactical raises an alert from the exit code.
+- The last line of stdout is `EXITCODE: N`. Tactical's ad-hoc command runner does not show the process exit code. Script checks still use the real exit code.
+- A text field that is null or blank prints as `n/a`. A numeric zero stays `0` when zero is a real measurement.
 - Idempotent. Running a script again does not pile on changes.
 - No reboot unless that script is given `-AllowReboot`.
 - No service stop or start unless that script is given `-AllowServiceRestart`.
@@ -48,7 +50,9 @@ GB in these scripts is a gibibyte (`1024^3`), which is what PowerShell means by 
 
 ### Disk health
 
-Checks internal physical disks. USB, SD, and MMC disks are skipped unless `-IncludeRemovable` is set. A disk fails when health is not `Healthy`, operational status is not `OK` or `In Service`, uncorrected read or write errors are greater than zero, or SSD wear is at or above `-MaxWearPercent`. Power-on hours and manufacture date are reported when the drive provides them. Hardware RAID and some storage controllers do not expose reliability counters; the script still uses the Windows health status and says when counters are missing.
+Checks internal physical disks. USB, SD, and MMC disks are skipped unless `-IncludeRemovable` is set. A disk fails when health is not `Healthy`, operational status is not `OK` or `In Service`, uncorrected read or write errors are greater than zero, or SSD wear is at or above `-MaxWearPercent`. Read and write counters that come back null print as `n/a`. Wear of `0` also prints as `n/a`, because Windows uses 0 when the drive does not expose wear; that display does not fail the disk. Trailing dots and spaces are removed from the serial number.
+
+Age uses the first source that has a real value: power-on hours greater than zero from `Get-StorageReliabilityCounter`, the manufacture date, power-on hours from `MSFT_StorageReliabilityCounter` matched by device id, the WMI disk install date, then the OS install date. The OS date is labeled `estimated from OS install date` so it is not mistaken for SMART age. Power-on hours of 0 are treated as not reported. Hardware RAID and some storage controllers do not expose reliability counters; the script still uses the Windows health status and says when counters are missing.
 
 ### Disk space
 
@@ -78,9 +82,11 @@ CPU support is a heuristic for common workstation processors (Intel Core 8th gen
 
 ### Hardware inventory
 
-Prints one JSON document to standard output. Warranty fields are the manufacturer, model, SKU, serial, asset tag, BIOS version and date, baseboard identity, and SMBIOS UUID. The script does not call Dell, HP, or Lenovo warranty APIs. VRAM uses the same `qwMemorySize` registry value as the GPU check. Memory channel mode is inferred from SMBIOS locators such as `ChannelA-DIMM0`. When those labels are missing, two equal modules are reported as dual channel and the basis line says that it was inferred.
+Prints one JSON document to standard output, then `EXITCODE: N` on the next line. Warranty fields are the manufacturer, model, SKU, serial, asset tag, BIOS version and date, baseboard identity, and SMBIOS UUID. The script does not call Dell, HP, or Lenovo warranty APIs. VRAM uses the same `qwMemorySize` registry value as the GPU check. Memory channel mode is inferred from SMBIOS locators such as `ChannelA-DIMM0`. When those labels are missing, two equal modules are reported as dual channel and the basis line says that it was inferred.
 
-Exit `1` means the inventory ran but model or serial is blank, so a warranty lookup would not have a key.
+Blank text fields are `n/a`. Numeric fields that were not collected stay JSON `null`. Disk wear and power-on hours of 0 are stored as `null` because Windows uses 0 when the drive does not report them. Trailing dots and spaces are removed from serial numbers.
+
+Exit `1` means the inventory ran but model or serial is blank, so a warranty lookup would not have a key. The JSON still shows `n/a` for that field. The exit decision uses the raw value, before `n/a` is substituted.
 
 ### GPU / VRAM
 
@@ -108,7 +114,7 @@ Enumerates the local Administrators group (SID `S-1-5-32-544`) through ADSI, and
 
 CI runs on Linux. It parses every script, runs PSScriptAnalyzer for errors, and runs Pester against the decision logic (thresholds, CPU heuristic, VRAM registry selection, Office XML, imaging conflict, admin allow list, reboot signals, JSON shape). It does not have a Windows disk, TPM, Office Click-to-Run, Windows Update Agent, or Tactical agent. These paths still need a Windows 10/11 or Server machine:
 
-- `Get-PhysicalDisk` / `Get-StorageReliabilityCounter` output and RAID controllers that hide SMART
+- `Get-PhysicalDisk` / `Get-StorageReliabilityCounter` output and RAID controllers that hide SMART. A Windows 11 24H2 run on a Crucial P3 500 GB NVMe returned Pass with null error counters, wear 0, no power-on hours, and a serial that ended in a dot. The display fixes for that output are covered by Pester. The CIM power-on-hour, disk-install-date, and OS-install-date fallbacks still need a Windows machine that lacks SMART hours.
 - temp, Windows Update cache, and recycle-bin deletion, including the `-AllowServiceRestart` service stop and start
 - Office Deployment Tool download, extract, and `setup.exe /configure`, including a 3010 reboot
 - `Win32_Tpm`, `Confirm-SecureBootUEFI`, and the firmware registry on real hardware

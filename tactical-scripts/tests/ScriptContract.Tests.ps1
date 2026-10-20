@@ -49,6 +49,7 @@ Describe 'Tactical script contract' {
         $content | Should -Not -Match '(?i)(password|pwd|api[_-]?key|secret)\s*=\s*[''"][^''"]+[''"]'
 
         $content | Should -Match 'Parameters:'
+        $content | Should -Match 'EXITCODE: \{0\}'
 
         if ($Name -ne 'Install-Microsoft365Apps.ps1') {
             $content | Should -Not -Match 'shutdown\.exe'
@@ -82,5 +83,7 @@ Describe 'Tactical script contract' {
         $LASTEXITCODE | Should -Be 2
         $output | Should -Match 'RESULT: Error'
         $output | Should -Match 'must run on Windows'
+        $lines = @($output -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $lines[-1] | Should -Be 'EXITCODE: 2'
     }
 }

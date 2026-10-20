@@ -17,7 +17,9 @@
 .NOTES
     Standard Computer Tactical RMM script. Windows PowerShell 5.1. Run as SYSTEM.
     Idempotent. Does not reboot and does not restart services.
-    Does not use credentials.
+    Does not use credentials. A missing text value prints as n/a.
+    The last stdout line is EXITCODE: N. Tactical ad-hoc command output does
+    not show the process exit code.
 
     Exit codes:
       0  Ready, already on Windows 11, or Windows Server (not applicable).
@@ -60,6 +62,19 @@ function Write-WrResult {
 
     Write-Output ('RESULT: {0}' -f $Result)
     Write-Output ('Summary: {0}' -f $Summary)
+}
+
+function Format-WrText {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'n/a'
+    }
+    return $text
 }
 
 function ConvertTo-WrByte {
@@ -389,7 +404,7 @@ function Invoke-WrMain {
 
         Write-Output ('Computer: {0}' -f $env:COMPUTERNAME)
         Write-Output ('Time: {0}' -f (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssK'))
-        Write-Output ('OS: {0} (build {1}, product type {2})' -f $caption, $build, $productType)
+        Write-Output ('OS: {0} (build {1}, product type {2})' -f (Format-WrText -Value $caption), $build, $productType)
         if ($isServer) {
             Write-Output 'Applicability: Windows Server is not a Windows 11 upgrade target'
         } elseif ($isWin11) {
@@ -493,7 +508,7 @@ function Invoke-WrMain {
 
         Write-Output ''
         foreach ($check in $checks) {
-            Write-Output ('{0}: {1} ({2})' -f $check.Name, $check.Status, $check.Detail)
+            Write-Output ('{0}: {1} ({2})' -f (Format-WrText -Value $check.Name), (Format-WrText -Value $check.Status), (Format-WrText -Value $check.Detail))
         }
         Write-Output ''
         Write-Output 'CPU support is a heuristic. Review status means the model was not on the built-in workstation list.'
@@ -517,5 +532,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Output ('Summary: {0}' -f $_.Exception.Message) | Out-Host
         $script:ScExitCode = 2
     }
+    Write-Output ('EXITCODE: {0}' -f $script:ScExitCode) | Out-Host
     exit $script:ScExitCode
 }

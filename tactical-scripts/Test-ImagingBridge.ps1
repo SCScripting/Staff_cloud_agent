@@ -17,7 +17,9 @@
 .NOTES
     Standard Computer Tactical RMM script. Windows PowerShell 5.1. Run as SYSTEM.
     Idempotent. Does not reboot and does not restart services.
-    Does not use credentials.
+    Does not use credentials. A missing text value prints as n/a.
+    The last stdout line is EXITCODE: N. Tactical ad-hoc command output does
+    not show the process exit code.
 
     Exit codes:
       0  The scan finished and Clever One is not installed beside EzDent-i.
@@ -51,6 +53,19 @@ function Write-IbResult {
 
     Write-Output ('RESULT: {0}' -f $Result)
     Write-Output ('Summary: {0}' -f $Summary)
+}
+
+function Format-IbText {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'n/a'
+    }
+    return $text
 }
 
 function Get-IbCatalog {
@@ -256,9 +271,9 @@ function Invoke-IbMain {
                 continue
             }
             foreach ($app in $foundApps) {
-                Write-Output ('  {0}: {1}  version {2}  publisher {3}' -f $label, $app.DisplayName, $app.Version, $app.Publisher)
+                Write-Output ('  {0}: {1}  version {2}  publisher {3}' -f $label, (Format-IbText -Value $app.DisplayName), (Format-IbText -Value $app.Version), (Format-IbText -Value $app.Publisher))
                 if (-not [string]::IsNullOrWhiteSpace($app.InstallLocation)) {
-                    Write-Output ('    Location: {0}' -f $app.InstallLocation)
+                    Write-Output ('    Location: {0}' -f (Format-IbText -Value $app.InstallLocation))
                 }
             }
         }
@@ -271,7 +286,7 @@ function Invoke-IbMain {
                 continue
             }
             $otherCount++
-            Write-Output ('  {0}: {1}  version {2}  publisher {3}' -f $app.Label, $app.DisplayName, $app.Version, $app.Publisher)
+            Write-Output ('  {0}: {1}  version {2}  publisher {3}' -f (Format-IbText -Value $app.Label), (Format-IbText -Value $app.DisplayName), (Format-IbText -Value $app.Version), (Format-IbText -Value $app.Publisher))
         }
         if ($otherCount -eq 0) {
             Write-Output '  none found in HKLM uninstall keys'
@@ -287,7 +302,7 @@ function Invoke-IbMain {
             if ([string]::IsNullOrWhiteSpace([string]$version)) {
                 $version = 'n/a'
             }
-            Write-Output ('  {0} ({1}) state {2} start {3} version {4}' -f $service.DisplayName, $service.Name, $service.State, $service.StartMode, $version)
+            Write-Output ('  {0} ({1}) state {2} start {3} version {4}' -f (Format-IbText -Value $service.DisplayName), (Format-IbText -Value $service.Name), (Format-IbText -Value $service.State), (Format-IbText -Value $service.StartMode), (Format-IbText -Value $version))
         }
 
         $labels = @()
@@ -317,5 +332,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Output ('Summary: {0}' -f $_.Exception.Message) | Out-Host
         $script:ScExitCode = 2
     }
+    Write-Output ('EXITCODE: {0}' -f $script:ScExitCode) | Out-Host
     exit $script:ScExitCode
 }

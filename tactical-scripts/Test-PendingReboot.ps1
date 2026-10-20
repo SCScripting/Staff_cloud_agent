@@ -13,7 +13,9 @@
 .NOTES
     Standard Computer Tactical RMM script. Windows PowerShell 5.1. Run as SYSTEM.
     Idempotent. Does not reboot and does not restart services.
-    Does not use credentials.
+    Does not use credentials. A missing text value prints as n/a.
+    The last stdout line is EXITCODE: N. Tactical ad-hoc command output does
+    not show the process exit code.
 
     Pending file rename operations are included because Windows uses them to
     finish updates and driver installs. Some application installers set the
@@ -51,6 +53,19 @@ function Write-PrResult {
 
     Write-Output ('RESULT: {0}' -f $Result)
     Write-Output ('Summary: {0}' -f $Summary)
+}
+
+function Format-PrText {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'n/a'
+    }
+    return $text
 }
 
 function Test-PrRebootPendingState {
@@ -159,7 +174,7 @@ function Invoke-PrMain {
         $renameComputer = Test-PrComputerRename
         $state = Test-PrRebootPendingState -ComponentBasedServicing $cbs -WindowsUpdate $wu -PendingFileRename $renameFiles -ComputerRename $renameComputer
 
-        Write-Output ('Computer: {0}' -f $env:COMPUTERNAME)
+        Write-Output ('Computer: {0}' -f (Format-PrText -Value $env:COMPUTERNAME))
         Write-Output ('Time: {0}' -f (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssK'))
         Write-Output ('Component Based Servicing: {0}' -f ($(if ($cbs) { 'PENDING' } else { 'clear' })))
         Write-Output ('Windows Update reboot required: {0}' -f ($(if ($wu) { 'PENDING' } else { 'clear' })))
@@ -188,5 +203,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Output ('Summary: {0}' -f $_.Exception.Message) | Out-Host
         $script:ScExitCode = 2
     }
+    Write-Output ('EXITCODE: {0}' -f $script:ScExitCode) | Out-Host
     exit $script:ScExitCode
 }

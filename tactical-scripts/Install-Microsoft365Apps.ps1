@@ -24,7 +24,9 @@
 
 .NOTES
     Standard Computer Tactical RMM script. Windows PowerShell 5.1. Run as SYSTEM.
-    Idempotent. Does not use credentials. Set the Tactical timeout to at least
+    Idempotent. Does not use credentials. A missing text value prints as n/a.
+    The last stdout line is EXITCODE: N. Tactical ad-hoc command output does
+    not show the process exit code. Set the Tactical timeout to at least
     90 minutes. The Office installer may restart the Click-to-Run service.
 
     Exit codes:
@@ -75,6 +77,19 @@ function Write-MoResult {
 
     Write-Output ('RESULT: {0}' -f $Result)
     Write-Output ('Summary: {0}' -f $Summary)
+}
+
+function Format-MoText {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'n/a'
+    }
+    return $text
 }
 
 function Format-MoXmlText {
@@ -330,8 +345,8 @@ function Invoke-MoMain {
         $state = Get-MoOfficeState
         if ($state.Products.Count -gt 0) {
             Write-Output ('Installed products: {0}' -f ($state.Products -join ', '))
-            Write-Output ('Platform: {0}' -f $state.Platform)
-            Write-Output ('Version: {0}' -f $state.Version)
+            Write-Output ('Platform: {0}' -f (Format-MoText -Value $state.Platform))
+            Write-Output ('Version: {0}' -f (Format-MoText -Value $state.Version))
             if (Test-MoCurrentChannel -Url $state.ChannelUrl) {
                 Write-Output 'Update channel: Current'
             } elseif (-not [string]::IsNullOrWhiteSpace($state.ChannelUrl)) {
@@ -432,7 +447,7 @@ function Invoke-MoMain {
             }
         }
         Write-Output ('Installed products after setup: {0}' -f ($(if ($after.Products.Count -eq 0) { 'none' } else { $after.Products -join ', ' })))
-        Write-Output ('Platform after setup: {0}' -f $after.Platform)
+        Write-Output ('Platform after setup: {0}' -f (Format-MoText -Value $after.Platform))
 
         if ($proc.ExitCode -eq 3010 -and $confirmed) {
             Write-Output 'Office setup reported that a reboot is required (3010).'
@@ -472,5 +487,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Output ('Summary: {0}' -f $_.Exception.Message) | Out-Host
         $script:ScExitCode = 2
     }
+    Write-Output ('EXITCODE: {0}' -f $script:ScExitCode) | Out-Host
     exit $script:ScExitCode
 }

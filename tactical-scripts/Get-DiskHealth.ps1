@@ -5,8 +5,13 @@
 .DESCRIPTION
     Purpose: Check SMART-style health for internal disks on a dental office
     workstation or server. Reports Get-PhysicalDisk health, reliability
-    counters, corrected and uncorrected read errors, HDD versus SSD, and age
-    when the drive exposes it. Fails when a disk is unhealthy.
+    counters, corrected and uncorrected read errors, HDD versus SSD, and age.
+    A null counter prints as n/a. Wear of 0 prints as n/a because Windows
+    uses 0 when the drive does not report wear; that value does not fail
+    the disk. Age uses power-on hours when they are greater than zero, then
+    the manufacture date, then MSFT_StorageReliabilityCounter power-on hours,
+    then the WMI disk install date, then the OS install date labeled as an
+    estimate. Fails when a disk is unhealthy.
 
     Parameters:
       -MaxWearPercent    Used SSD life percent that fails the disk. Default 90.
@@ -17,6 +22,9 @@
     Standard Computer Tactical RMM script. Windows PowerShell 5.1. Run as SYSTEM.
     Idempotent. Does not reboot and does not restart services.
     Does not use credentials.
+    Serial numbers have trailing dots and spaces removed.
+    The last stdout line is EXITCODE: N. Tactical ad-hoc command output does
+    not show the process exit code.
 
     Exit codes:
       0  Every in-scope disk is healthy.
@@ -263,17 +271,53 @@ function Test-DhDiskState {
     }
 }
 
+function Format-DhCalendarAge {
+    param(
+        $Value,
+        [datetime]$Now,
+        [string]$Label
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    $date = [datetime]$Value
+    if ($date.Year -le 1990 -or $date -gt $Now) {
+        return $null
+    }
+    $days = [math]::Floor(($Now - $date).TotalDays)
+    $ageYears = [math]::Round($days / 365.25, 1)
+    $ageText = $ageYears.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    return ('{0} {1} ({2} years ago)' -f $Label, $date.ToString('yyyy-MM-dd'), $ageText)
+}
+
+function Test-DhReportedAge {
+    param([string[]]$Part)
+
+    foreach ($entry in @($Part)) {
+        if ([string]::IsNullOrWhiteSpace($entry)) {
+            continue
+        }
+        if ($entry -notmatch 'was unreadable') {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Format-DhAge {
     param(
         $PowerOnHours,
         $ManufactureDate,
-        [datetime]$Now
+        [datetime]$Now,
+        $DiskInstallDate,
+        $OsInstallDate
     )
 
     $parts = @()
     $hourText = [string]$PowerOnHours
-    if ($hourText -match '^\d+$') {
-        $hours = [int64]$hourText
+    $hours = [int64]0
+    if ($hourText -match '^\d+$' -and [int64]::TryParse($hourText, [ref]$hours) -and $hours -gt 0) {
         $years = [math]::Round($hours / 8760, 1)
         $yearText = $years.ToString([System.Globalization.CultureInfo]::InvariantCulture)
         $parts += "power-on $hours hours ($yearText years)"
@@ -281,22 +325,94 @@ function Format-DhAge {
 
     if ($null -ne $ManufactureDate -and -not [string]::IsNullOrWhiteSpace([string]$ManufactureDate)) {
         try {
-            $made = [datetime]$ManufactureDate
-            if ($made.Year -gt 1990 -and $made -le $Now) {
-                $days = [math]::Floor(($Now - $made).TotalDays)
-                $ageYears = [math]::Round($days / 365.25, 1)
-                $ageText = $ageYears.ToString([System.Globalization.CultureInfo]::InvariantCulture)
-                $parts += ('manufactured {0} ({1} years ago)' -f $made.ToString('yyyy-MM-dd'), $ageText)
+            $madeText = Format-DhCalendarAge -Value ([datetime]$ManufactureDate) -Now $Now -Label 'manufactured'
+            if ($null -ne $madeText) {
+                $parts += $madeText
             }
         } catch {
             $parts += 'manufacture date was unreadable'
         }
     }
 
-    if ($parts.Count -eq 0) {
+    if (-not (Test-DhReportedAge -Part $parts)) {
+        if ($null -ne $DiskInstallDate -and -not [string]::IsNullOrWhiteSpace([string]$DiskInstallDate)) {
+            try {
+                $diskText = Format-DhCalendarAge -Value ([datetime]$DiskInstallDate) -Now $Now -Label 'disk install date'
+                if ($null -ne $diskText) {
+                    $parts += $diskText
+                }
+            } catch {
+                $parts += 'disk install date was unreadable'
+            }
+        }
+    }
+
+    if (-not (Test-DhReportedAge -Part $parts)) {
+        if ($null -ne $OsInstallDate -and -not [string]::IsNullOrWhiteSpace([string]$OsInstallDate)) {
+            try {
+                $osText = Format-DhCalendarAge -Value ([datetime]$OsInstallDate) -Now $Now -Label 'estimated from OS install date'
+                if ($null -ne $osText) {
+                    $parts += $osText
+                }
+            } catch {
+                $parts += 'OS install date was unreadable'
+            }
+        }
+    }
+
+    if (-not (Test-DhReportedAge -Part $parts)) {
         return 'n/a'
     }
     return ($parts -join '; ')
+}
+
+function Format-DhText {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'n/a'
+    }
+    return $text
+}
+
+function Format-DhWear {
+    param($Wear)
+
+    if ($null -eq $Wear) {
+        return 'n/a'
+    }
+    $text = ([string]$Wear).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'n/a'
+    }
+    $number = 0.0
+    $style = [System.Globalization.NumberStyles]::Float
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    if (-not [double]::TryParse($text, $style, $culture, [ref]$number)) {
+        return 'n/a'
+    }
+    if ($number -le 0) {
+        return 'n/a'
+    }
+    return $number.ToString($culture)
+}
+
+function Format-DhSerial {
+    param($Serial)
+
+    if ($null -eq $Serial) {
+        return 'n/a'
+    }
+    $text = ([string]$Serial).Trim()
+    $text = $text -replace '[\s\.]+$', ''
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'n/a'
+    }
+    return $text
 }
 
 function Format-DhGb {
@@ -347,6 +463,90 @@ function Get-DhReliabilityCounter {
     }
 }
 
+function Get-DhPositiveHour {
+    param($Value)
+
+    $text = [string]$Value
+    $hours = [int64]0
+    if ($text -match '^\d+$' -and [int64]::TryParse($text, [ref]$hours) -and $hours -gt 0) {
+        return $hours
+    }
+    return $null
+}
+
+function Get-DhCimReliabilityCounter {
+    try {
+        return @(Get-CimInstance -Namespace 'root\microsoft\windows\storage' -ClassName 'MSFT_StorageReliabilityCounter' -ErrorAction Stop)
+    } catch {
+        return @()
+    }
+}
+
+function Resolve-DhPowerOnHour {
+    param(
+        $Counter,
+        $DeviceId,
+        $CimCounter
+    )
+
+    $fromCmdlet = Get-DhPositiveHour -Value (Get-DhProperty -Object $Counter -Name 'PowerOnHours')
+    if ($null -ne $fromCmdlet) {
+        return $fromCmdlet
+    }
+
+    $wanted = [string]$DeviceId
+    if ([string]::IsNullOrWhiteSpace($wanted)) {
+        return $null
+    }
+    foreach ($cim in @($CimCounter)) {
+        $id = [string](Get-DhProperty -Object $cim -Name 'DeviceId')
+        if ($id -ne $wanted) {
+            continue
+        }
+        return Get-DhPositiveHour -Value (Get-DhProperty -Object $cim -Name 'PowerOnHours')
+    }
+    return $null
+}
+
+function Get-DhDiskInstallDate {
+    param(
+        [string]$Serial,
+        $DiskDrive
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Serial) -or $Serial -eq 'n/a') {
+        return $null
+    }
+    foreach ($drive in @($DiskDrive)) {
+        $driveSerial = Format-DhSerial -Serial (Get-DhProperty -Object $drive -Name 'SerialNumber')
+        if ($driveSerial -eq 'n/a') {
+            continue
+        }
+        if (-not $driveSerial.Equals($Serial, [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        return Get-DhProperty -Object $drive -Name 'InstallDate'
+    }
+    return $null
+}
+
+function Get-DhOsInstallDate {
+    try {
+        $os = Get-CimInstance -ClassName 'Win32_OperatingSystem' -ErrorAction Stop
+        return Get-DhProperty -Object $os -Name 'InstallDate'
+    } catch {
+        return $null
+    }
+}
+
+function Get-DhDiskDrive {
+    try {
+        return @(Get-CimInstance -ClassName 'Win32_DiskDrive' -ErrorAction Stop)
+    } catch {
+        return @()
+    }
+}
+
 function Invoke-DhMain {
     param(
         [int]$MaxWearPercent = 90,
@@ -376,6 +576,9 @@ function Invoke-DhMain {
         }
 
         $now = Get-Date
+        $cimCounters = @(Get-DhCimReliabilityCounter)
+        $diskDrives = @(Get-DhDiskDrive)
+        $osInstall = Get-DhOsInstallDate
         $checked = 0
         $failed = New-Object System.Collections.Generic.List[string]
         $index = 0
@@ -416,23 +619,27 @@ function Invoke-DhMain {
                 }
             }
 
+            $serial = Format-DhSerial -Serial (Get-DhProperty -Object $raw -Name 'SerialNumber')
+            $powerOn = Resolve-DhPowerOnHour -Counter $counter -DeviceId (Get-DhProperty -Object $raw -Name 'DeviceId') -CimCounter $cimCounters
+            $diskInstall = Get-DhDiskInstallDate -Serial $serial -DiskDrive $diskDrives
+
             Write-Output ''
             Write-Output ('Disk {0}: {1}' -f $index, $friendly)
-            Write-Output ('  Serial: {0}' -f (Get-DhProperty -Object $raw -Name 'SerialNumber'))
-            Write-Output ('  Media: {0}' -f $kind)
-            Write-Output ('  Bus: {0}' -f $bus)
+            Write-Output ('  Serial: {0}' -f $serial)
+            Write-Output ('  Media: {0}' -f (Format-DhText -Value $kind))
+            Write-Output ('  Bus: {0}' -f (Format-DhText -Value $bus))
             Write-Output ('  SizeGB: {0}' -f (Format-DhGb -Bytes (Get-DhProperty -Object $raw -Name 'Size')))
-            Write-Output ('  Firmware: {0}' -f (Get-DhProperty -Object $raw -Name 'FirmwareVersion'))
-            Write-Output ('  HealthStatus: {0}' -f $health)
+            Write-Output ('  Firmware: {0}' -f (Format-DhText -Value (Get-DhProperty -Object $raw -Name 'FirmwareVersion')))
+            Write-Output ('  HealthStatus: {0}' -f (Format-DhText -Value $health))
             Write-Output ('  OperationalStatus: {0}' -f ($(if ($ops.Count -eq 0) { 'n/a' } else { $ops -join ', ' })))
-            Write-Output ('  ReadErrorsTotal: {0}' -f (Get-DhProperty -Object $counter -Name 'ReadErrorsTotal'))
-            Write-Output ('  ReadErrorsCorrected: {0}' -f (Get-DhProperty -Object $counter -Name 'ReadErrorsCorrected'))
-            Write-Output ('  ReadErrorsUncorrected: {0}' -f $readUncorrected)
-            Write-Output ('  WriteErrorsTotal: {0}' -f (Get-DhProperty -Object $counter -Name 'WriteErrorsTotal'))
-            Write-Output ('  WriteErrorsUncorrected: {0}' -f $writeUncorrected)
-            Write-Output ('  WearPercent: {0}' -f $wear)
-            Write-Output ('  TemperatureC: {0}' -f (Get-DhProperty -Object $counter -Name 'Temperature'))
-            Write-Output ('  Age: {0}' -f (Format-DhAge -PowerOnHours (Get-DhProperty -Object $counter -Name 'PowerOnHours') -ManufactureDate (Get-DhProperty -Object $counter -Name 'ManufactureDate') -Now $now))
+            Write-Output ('  ReadErrorsTotal: {0}' -f (Format-DhText -Value (Get-DhProperty -Object $counter -Name 'ReadErrorsTotal')))
+            Write-Output ('  ReadErrorsCorrected: {0}' -f (Format-DhText -Value (Get-DhProperty -Object $counter -Name 'ReadErrorsCorrected')))
+            Write-Output ('  ReadErrorsUncorrected: {0}' -f (Format-DhText -Value $readUncorrected))
+            Write-Output ('  WriteErrorsTotal: {0}' -f (Format-DhText -Value (Get-DhProperty -Object $counter -Name 'WriteErrorsTotal')))
+            Write-Output ('  WriteErrorsUncorrected: {0}' -f (Format-DhText -Value $writeUncorrected))
+            Write-Output ('  WearPercent: {0}' -f (Format-DhWear -Wear $wear))
+            Write-Output ('  TemperatureC: {0}' -f (Format-DhText -Value (Get-DhProperty -Object $counter -Name 'Temperature')))
+            Write-Output ('  Age: {0}' -f (Format-DhAge -PowerOnHours $powerOn -ManufactureDate (Get-DhProperty -Object $counter -Name 'ManufactureDate') -Now $now -DiskInstallDate $diskInstall -OsInstallDate $osInstall))
             if ($null -eq $counter -and $inScope) {
                 Write-Output '  Reliability counters: unavailable'
             }
@@ -469,5 +676,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Output ('Summary: {0}' -f $_.Exception.Message) | Out-Host
         $script:ScExitCode = 2
     }
+    Write-Output ('EXITCODE: {0}' -f $script:ScExitCode) | Out-Host
     exit $script:ScExitCode
 }

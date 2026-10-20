@@ -343,6 +343,17 @@ def _measure(item, key, suffix):
     return text + suffix
 
 
+def _disk_free(item):
+    if not isinstance(item, dict):
+        return ""
+    text = _text(_value(item, "free"))
+    if not text:
+        return ""
+    if text == "n/a":
+        return "free n/a"
+    return "free " + text + " GB"
+
+
 def flatten_survey(agent, survey, source, history_time):
     identity = survey.get("identity") if isinstance(survey.get("identity"), dict) else {}
     form = survey.get("formFactor") if isinstance(survey.get("formFactor"), dict) else {}
@@ -442,6 +453,7 @@ def flatten_survey(agent, survey, source, history_time):
                         _measure(item, "size", " GB"),
                         _field(item, "media"),
                         _field(item, "health"),
+                        _disk_free(item),
                     )
                     if part
                 ),

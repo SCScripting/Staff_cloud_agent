@@ -216,6 +216,38 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(row["form_factor"], "Small")
         self.assertEqual(row["form_detail"], "Mini PC; model indicates Small")
 
+    def test_disk_column_includes_free_gb(self):
+        row = collector.flatten_survey(
+            {"agent_id": "a", "hostname": "SC-BLINK-TV04", "client": "c", "site": "s"},
+            {
+                "storage": {
+                    "disk": [
+                        {
+                            "model": "CT500P3SSD8",
+                            "size": "465.8",
+                            "media": "NVMe",
+                            "health": "Healthy",
+                            "free": "293.7",
+                        }
+                    ],
+                    "volume": [],
+                }
+            },
+            "history",
+            "",
+        )
+        self.assertEqual(
+            row["disks"],
+            "CT500P3SSD8 465.8 GB NVMe Healthy free 293.7 GB",
+        )
+        missing = collector.flatten_survey(
+            {"agent_id": "a", "hostname": "PC", "client": "c", "site": "s"},
+            {"storage": {"disk": [{"model": "Disk", "size": "100", "media": "SSD", "health": "Healthy", "Free": "n/a"}]}},
+            "history",
+            "",
+        )
+        self.assertIn("free n/a", missing["disks"])
+
     def test_missing_history_stays_read_only_without_run(self):
         routes = dict(self.client_routes)
         routes[("GET", "/agents/scripthistory/")] = []

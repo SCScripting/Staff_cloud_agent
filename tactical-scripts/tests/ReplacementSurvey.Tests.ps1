@@ -160,7 +160,8 @@ Describe 'Replacement survey mapping' {
         $notes | Should -Contain 'Needs VGA output'
         $notes | Should -Contain 'Uses 2 monitors'
         $notes | Should -Contain 'Needs COM port'
-        $notes | Should -Contain 'Needs WiFi'
+        $notes | Should -Contain 'Has WiFi adapter (not in use) - include WiFi on replacement'
+        $notes | Should -Not -Contain 'Needs WiFi'
         $notes | Should -Contain 'Dedicated GPU required (CBCT)'
 
         $present = @(Get-RsReplacementNote -DedicatedGpu $true -ImagingSoftware $false -BatteryHealth -1)
@@ -539,6 +540,62 @@ Describe 'Replacement survey accuracy' {
         $one = @(Get-RsReplacementNote -ExternalMonitor 1 -BatteryHealth -1)
         $one | Should -Contain 'Uses 1 monitor'
         $one | Should -Not -Contain 'Uses 1 monitors'
+
+        $collapsedUse = Get-RsActiveConnection -Monitor $collapsed.ToArray()
+        (Format-RsPortTally -Type $collapsedUse.ToArray()) | Should -Be 'HDMI x1'
+        $distinct = Select-RsUniqueMonitor -Monitor @($hdmiReal, $displayPort)
+        (Format-RsPortTally -Type (Get-RsActiveConnection -Monitor $distinct.ToArray()).ToArray()) | Should -Be 'HDMI x1, DisplayPort x1'
+        $twoHdmi = Select-RsUniqueMonitor -Monitor @(
+            [pscustomobject]@{
+                make = 'Dell'; model = 'U2720Q'; product = 'DELL'; serial = 'CN111'
+                sizeInch = '27'; connection = 'HDMI'; resolution = '3840x2160'; outputKey = 'DISPLAY\DEL\1'
+            }
+            [pscustomobject]@{
+                make = 'Dell'; model = 'P2422H'; product = 'DELL'; serial = 'CN222'
+                sizeInch = '24'; connection = 'HDMI'; resolution = '1920x1080'; outputKey = 'DISPLAY\DEL\2'
+            }
+        )
+        (Format-RsPortTally -Type (Get-RsActiveConnection -Monitor $twoHdmi.ToArray()).ToArray()) | Should -Be 'HDMI x2'
+    }
+
+    It 'prints shared memory for an integrated GPU and estimated physical ports when known' {
+        Format-RsGpuLine -Gpu ([pscustomobject]@{
+            name = 'Intel(R) UHD Graphics'; kind = 'integrated'; vram = 'n/a'; vramSource = 'n/a'
+        }) | Should -Be 'Intel(R) UHD Graphics (integrated) Shared memory (integrated)'
+        Format-RsGpuLine -Gpu ([pscustomobject]@{
+            name = 'NVIDIA GeForce RTX 3060'; kind = 'dedicated'; vram = '8'; vramSource = 'qwMemorySize'
+        }) | Should -Be 'NVIDIA GeForce RTX 3060 (dedicated) VRAM 8 via qwMemorySize'
+
+        Get-RsPhysicalPort -Gpu @([pscustomobject]@{ estimated = 'n/a' }) | Should -Be 'n/a'
+        Get-RsPhysicalPort -Gpu @([pscustomobject]@{ estimated = 'HDMI x1, DisplayPort x3' }) | Should -Be 'HDMI x1, DisplayPort x3'
+
+        $summary = Format-RsSummary -Survey ([pscustomobject]@{
+            display = [pscustomobject]@{
+                reported = 'HDMI x1'
+                physical = 'HDMI x1, DisplayPort x3'
+                source   = 'WmiMonitorConnectionParams'
+                gpu      = @([pscustomobject]@{
+                    name = 'NVIDIA GeForce RTX 3060'; kind = 'dedicated'; vram = '8'; vramSource = 'qwMemorySize'
+                    estimated = 'HDMI x1, DisplayPort x3'; estimateNote = 'estimated from GPU model; reference layout, board partners vary'
+                })
+            }
+        })
+        $summary | Should -Match 'Connections in use: HDMI x1'
+        $summary | Should -Match 'Physical ports: HDMI x1, DisplayPort x3 \(estimated\)'
+        $summary | Should -Match 'Estimated ports: HDMI x1, DisplayPort x3'
+    }
+
+    It 'keeps a Wi-Fi replacement note and says when the adapter is idle' {
+        $idle = @(Get-RsReplacementNote -Wifi $true -WifiInUse $false -BatteryHealth -1)
+        $idle | Should -Contain 'Has WiFi adapter (not in use) - include WiFi on replacement'
+        $active = @(Get-RsReplacementNote -Wifi $true -WifiInUse $true -BatteryHealth -1)
+        $active | Should -Contain 'Has WiFi adapter - include WiFi on replacement'
+        $active | Should -Not -Contain 'Has WiFi adapter (not in use) - include WiFi on replacement'
+        Test-RsWifiAddressInUse -Address 'n/a' | Should -BeFalse
+        Test-RsWifiAddressInUse -Address 'fe80::1' | Should -BeFalse
+        Test-RsWifiAddressInUse -Address '10.3.1.50, fe80::1' | Should -BeTrue
+        Test-RsWifiInUse -Adapter @([pscustomobject]@{ ip = 'n/a' }) | Should -BeFalse
+        Test-RsWifiInUse -Adapter @([pscustomobject]@{ ip = '10.3.1.50' }) | Should -BeTrue
     }
 
     It 'does not require a COM port for the built-in UART alone' {
@@ -588,6 +645,12 @@ Describe 'Replacement survey accuracy' {
                         Caption     = 'Microsoft Windows 11 Pro'
                         BuildNumber = '26100'
                         ProductType = 1
+                    }
+                }
+                'Win32_VideoController' {
+                    return [pscustomobject]@{
+                        Name        = 'Intel(R) UHD Graphics'
+                        PNPDeviceID = 'PCI\VEN_8086&DEV_46A3'
                     }
                 }
                 'Win32_Processor' {
@@ -682,9 +745,18 @@ Describe 'Replacement survey accuracy' {
         $survey.monitor.count | Should -Be 1
         $survey.monitor.external | Should -Be 1
         [string]$survey.monitor.item[0].serial | Should -Be '16843009 (placeholder)'
+        $survey.display.reported | Should -Be 'HDMI x1'
+        $survey.display.physical | Should -Be 'n/a'
+        $summary = Format-RsSummary -Survey $survey
+        $summary | Should -Match 'Connections in use: HDMI x1'
+        $summary | Should -Not -Match 'Physical ports:'
+        $summary | Should -Match 'Shared memory \(integrated\)'
+        $summary | Should -Not -Match 'VRAM n/a via n/a'
+        $summary | Should -Not -Match 'Estimated ports:'
         $survey.port.com | Should -Be 'COM1'
         $survey.note | Should -Contain 'Uses 1 monitor'
         $survey.note | Should -Not -Contain 'Needs COM port'
+        $survey.note | Should -Contain 'Has WiFi adapter (not in use) - include WiFi on replacement'
         $survey.os.readiness | Should -Not -Match 'CPU'
     }
 }

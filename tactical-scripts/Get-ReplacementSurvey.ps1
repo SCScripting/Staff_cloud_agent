@@ -683,6 +683,61 @@ function Get-RsExternalMonitorCount {
     return $count
 }
 
+function Get-RsActiveConnection {
+    param([object[]]$Monitor)
+
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @($Monitor)) {
+        if ($null -eq $item) {
+            continue
+        }
+        $connection = Format-RsText -Value (Get-RsProperty -Object $item -Name 'connection')
+        if ($connection -eq 'n/a') {
+            continue
+        }
+        $names.Add($connection)
+    }
+    return ,$names
+}
+
+function Get-RsPhysicalPort {
+    param([object[]]$Gpu)
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @($Gpu)) {
+        if ($null -eq $item) {
+            continue
+        }
+        $estimated = Format-RsText -Value (Get-RsProperty -Object $item -Name 'estimated')
+        if ($estimated -eq 'n/a') {
+            continue
+        }
+        if (-not $parts.Contains($estimated)) {
+            $parts.Add($estimated)
+        }
+    }
+    if ($parts.Count -eq 0) {
+        return 'n/a'
+    }
+    return ($parts -join ', ')
+}
+
+function Format-RsGpuLine {
+    param($Gpu)
+
+    $name = Format-RsText -Value (Get-RsProperty -Object $Gpu -Name 'name')
+    $kind = Format-RsText -Value (Get-RsProperty -Object $Gpu -Name 'kind')
+    if ($kind -eq 'integrated') {
+        return ('{0} (integrated) Shared memory (integrated)' -f $name)
+    }
+    $vram = Format-RsText -Value (Get-RsProperty -Object $Gpu -Name 'vram')
+    $source = Format-RsText -Value (Get-RsProperty -Object $Gpu -Name 'vramSource')
+    if ($source -eq 'n/a') {
+        return ('{0} ({1}) VRAM {2}' -f $name, $kind, $vram)
+    }
+    return ('{0} ({1}) VRAM {2} via {3}' -f $name, $kind, $vram, $source)
+}
+
 function Test-RsDedicatedGpu {
     param(
         [string]$Name,
@@ -1094,6 +1149,45 @@ function Test-RsEthernetAdapter {
     }
     if ($Name -match '(?i)Ethernet' -or $AdapterType -match '(?i)Ethernet') {
         return $true
+    }
+    return $false
+}
+
+function Test-RsWifiAddressInUse {
+    param([string]$Address)
+
+    if ([string]::IsNullOrWhiteSpace($Address) -or $Address -eq 'n/a') {
+        return $false
+    }
+    foreach ($part in $Address.Split(',')) {
+        $token = $part.Trim()
+        if ([string]::IsNullOrWhiteSpace($token)) {
+            continue
+        }
+        if ($token -match '(?i)^fe80:') {
+            continue
+        }
+        if ($token -match '(?i)^169\.254\.') {
+            continue
+        }
+        return $true
+    }
+    return $false
+}
+
+function Test-RsWifiInUse {
+    param($Adapter)
+
+    if ($null -eq $Adapter) {
+        return $false
+    }
+    foreach ($entry in $Adapter) {
+        if ($null -eq $entry) {
+            continue
+        }
+        if (Test-RsWifiAddressInUse -Address ([string](Get-RsProperty -Object $entry -Name 'ip'))) {
+            return $true
+        }
     }
     return $false
 }
@@ -1599,6 +1693,7 @@ function Get-RsReplacementNote {
         [bool]$VgaConnected = $false,
         [bool]$ComPort = $false,
         [bool]$Wifi = $false,
+        [bool]$WifiInUse = $false,
         [bool]$DedicatedGpu = $false,
         [bool]$ImagingSoftware = $false,
         [string]$FormFactor = '',
@@ -1625,7 +1720,11 @@ function Get-RsReplacementNote {
         $notes.Add('Needs COM port')
     }
     if ($Wifi) {
-        $notes.Add('Needs WiFi')
+        if ($WifiInUse) {
+            $notes.Add('Has WiFi adapter - include WiFi on replacement')
+        } else {
+            $notes.Add('Has WiFi adapter (not in use) - include WiFi on replacement')
+        }
     }
     if ($DedicatedGpu -and $ImagingSoftware) {
         $notes.Add('Dedicated GPU required (CBCT)')
@@ -1877,18 +1976,26 @@ function Format-RsSummary {
 
     $display = Get-RsProperty -Object $Survey -Name 'display'
     $lines.Add('Display outputs')
-    $lines.Add(('  Reported connections: {0}' -f (Format-RsText -Value (Get-RsProperty -Object $display -Name 'reported'))))
+    $lines.Add(('  Connections in use: {0}' -f (Format-RsText -Value (Get-RsProperty -Object $display -Name 'reported'))))
+    $physicalPort = Format-RsText -Value (Get-RsProperty -Object $display -Name 'physical')
+    if ($physicalPort -ne 'n/a') {
+        $lines.Add(('  Physical ports: {0} (estimated)' -f $physicalPort))
+    }
     $source = Format-RsText -Value (Get-RsProperty -Object $display -Name 'source')
     if ($source -ne 'n/a') {
-        $lines.Add(('  Reported source: {0}' -f $source))
+        $lines.Add(('  Source: {0}' -f $source))
     }
     $gpuSeen = $false
     foreach ($gpu in @(Get-RsProperty -Object $display -Name 'gpu')) {
         $gpuSeen = $true
-        $lines.Add(('  {0} ({1}) VRAM {2} via {3}' -f (Format-RsText -Value $gpu.name), (Format-RsText -Value $gpu.kind), (Format-RsText -Value $gpu.vram), (Format-RsText -Value $gpu.vramSource)))
-        $lines.Add(('    Estimated ports: {0}' -f (Format-RsText -Value $gpu.estimated)))
+        $lines.Add(('  {0}' -f (Format-RsGpuLine -Gpu $gpu)))
+        $gpuKind = Format-RsText -Value $gpu.kind
+        $estimatedPort = Format-RsText -Value $gpu.estimated
+        if ($gpuKind -ne 'integrated' -and $estimatedPort -ne 'n/a') {
+            $lines.Add(('    Estimated ports: {0}' -f $estimatedPort))
+        }
         $estimateNote = Format-RsText -Value $gpu.estimateNote
-        if ($estimateNote -ne 'n/a') {
+        if ($estimateNote -ne 'n/a' -and $gpuKind -ne 'integrated') {
             $lines.Add(('    Estimate note: {0}' -f $estimateNote))
         }
     }
@@ -2729,6 +2836,10 @@ function Get-RsCollectedSurvey {
         }
         $monitorItems = Select-RsUniqueMonitor -Monitor @($monitorItems.ToArray())
         $external = Get-RsExternalMonitorCount -Monitor @($monitorItems.ToArray())
+        $activeConnection = Get-RsActiveConnection -Monitor @($monitorItems.ToArray())
+        if ($activeConnection.Count -gt 0) {
+            $reportedNames = $activeConnection
+        }
     } catch {
         $problem.Add((Get-RsSectionError -Section 'monitors' -ErrorRecord $_))
         $reportedNames = New-Object System.Collections.Generic.List[string]
@@ -3292,7 +3403,13 @@ function Get-RsCollectedSurvey {
                 }
             }
         }
-        $notes = @(Get-RsReplacementNote -VideoOutput @($reportedNames) -ExternalMonitor $external -VgaConnected $vga -ComPort $comNeeded -Wifi ($wifiItems.Count -gt 0) -DedicatedGpu $dedicated -ImagingSoftware $imaging -FormFactor $formSize -Thunderbolt $thunderbolt -BatteryHealth $batteryHealth)
+        $wifiPresent = $false
+        $wifiInUse = $false
+        if ($null -ne $wifiItems -and $wifiItems.Count -gt 0) {
+            $wifiPresent = $true
+            $wifiInUse = Test-RsWifiInUse -Adapter $wifiItems.ToArray()
+        }
+        $notes = @(Get-RsReplacementNote -VideoOutput @($reportedNames) -ExternalMonitor $external -VgaConnected $vga -ComPort $comNeeded -Wifi $wifiPresent -WifiInUse $wifiInUse -DedicatedGpu $dedicated -ImagingSoftware $imaging -FormFactor $formSize -Thunderbolt $thunderbolt -BatteryHealth $batteryHealth)
     } catch {
         $problem.Add((Get-RsSectionError -Section 'notes' -ErrorRecord $_))
         $notes = @()
@@ -3317,7 +3434,8 @@ function Get-RsCollectedSurvey {
         }
         formFactor = $form
         display    = [pscustomobject]@{
-            reported = (Format-RsPortTally -Type @($reportedNames))
+            reported = (Format-RsPortTally -Type @($reportedNames.ToArray()))
+            physical = (Get-RsPhysicalPort -Gpu @($gpuItems.ToArray()))
             source   = $reportedSource
             gpu      = $gpuItems
         }

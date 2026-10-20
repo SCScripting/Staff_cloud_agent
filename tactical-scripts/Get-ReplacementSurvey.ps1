@@ -572,6 +572,117 @@ function Get-RsMonitorKey {
     return ([string]$InstanceName).ToUpperInvariant()
 }
 
+function Test-RsPlaceholderSerial {
+    param([string]$Serial)
+
+    $text = ([string]$Serial).Trim()
+    if ([string]::IsNullOrWhiteSpace($text) -or $text -eq 'n/a') {
+        return $false
+    }
+    $compact = ([regex]::Replace($text, '[^A-Fa-f0-9]', '')).ToUpperInvariant()
+    if ($compact -eq '16843009' -or $compact -eq '01010101') {
+        return $true
+    }
+    if ($compact.Length -ge 4 -and $compact -match '^(.)\1+$') {
+        return $true
+    }
+    if ($compact -match '^(00)+$' -or $compact -match '^(01)+$') {
+        return $true
+    }
+    return $false
+}
+
+function Format-RsMonitorSerial {
+    param([string]$Serial)
+
+    $text = Format-RsText -Value $Serial
+    if ($text -eq 'n/a') {
+        return 'n/a'
+    }
+    if (Test-RsPlaceholderSerial -Serial $text) {
+        return ($text + ' (placeholder)')
+    }
+    return $text
+}
+
+function Get-RsMonitorIdentity {
+    param(
+        [string]$Make,
+        [string]$Model,
+        [string]$Product,
+        [string]$Serial
+    )
+
+    $modelText = [regex]::Replace([string]$Model, '(?i)\s*\(made\s+\d{4}\)\s*$', '')
+    $serialText = [regex]::Replace([string]$Serial, '(?i)\s*\(placeholder\)\s*$', '')
+    return ('{0}|{1}|{2}|{3}' -f $Make.Trim().ToUpperInvariant(), $modelText.Trim().ToUpperInvariant(), ([string]$Product).Trim().ToUpperInvariant(), $serialText.Trim().ToUpperInvariant())
+}
+
+function Select-RsUniqueMonitor {
+    param([object[]]$Monitor)
+
+    $kept = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($item in @($Monitor)) {
+        if ($null -eq $item) {
+            continue
+        }
+        $identity = Get-RsMonitorIdentity -Make ([string]$item.make) -Model ([string]$item.model) -Product ([string]$item.product) -Serial ([string]$item.serial)
+        $outputKey = [string]$item.outputKey
+        $connection = [string]$item.connection
+        if ([string]::IsNullOrWhiteSpace($connection)) {
+            $connection = 'n/a'
+        }
+        if (-not $seen.ContainsKey($identity)) {
+            $seen[$identity] = New-Object System.Collections.Generic.List[object]
+        }
+        $duplicate = $false
+        foreach ($prior in @($seen[$identity].ToArray())) {
+            $priorKey = [string]$prior.outputKey
+            $priorConn = [string]$prior.connection
+            if ([string]::IsNullOrWhiteSpace($priorConn)) {
+                $priorConn = 'n/a'
+            }
+            $sameKey = (-not [string]::IsNullOrWhiteSpace($outputKey) -and $outputKey -eq $priorKey)
+            $sameLabel = ($connection -ne 'n/a' -and $connection -eq $priorConn)
+            if ($sameKey -or $sameLabel) {
+                $duplicate = $true
+                break
+            }
+        }
+        if ($duplicate) {
+            continue
+        }
+        $seen[$identity].Add($item)
+        $kept.Add([pscustomobject]@{
+            make       = (Format-RsText -Value $item.make)
+            model      = (Format-RsText -Value $item.model)
+            product    = (Format-RsText -Value $item.product)
+            serial     = (Format-RsMonitorSerial -Serial ([string]$item.serial))
+            sizeInch   = (Format-RsText -Value $item.sizeInch)
+            connection = (Format-RsText -Value $connection)
+            resolution = (Format-RsText -Value $item.resolution)
+        })
+    }
+    return ,$kept
+}
+
+function Get-RsExternalMonitorCount {
+    param([object[]]$Monitor)
+
+    $count = 0
+    foreach ($item in @($Monitor)) {
+        if ($null -eq $item) {
+            continue
+        }
+        $connection = [string]$item.connection
+        if ($connection -ne 'Internal' -and $connection -ne 'LVDS') {
+            $count++
+        }
+    }
+    return $count
+}
+
 function Test-RsDedicatedGpu {
     param(
         [string]$Name,
@@ -647,15 +758,85 @@ function ConvertTo-RsMemoryType {
         '22' = 'DDR2 FB-DIMM'
         '24' = 'DDR3'
         '26' = 'DDR4'
+        '30' = 'LPDDR4'
+        '31' = 'LPDDR4X'
         '34' = 'DDR5'
+        '35' = 'LPDDR5'
+        '36' = 'LPDDR5X'
     }
     if ($map.ContainsKey($code)) {
         return [string]$map[$code]
     }
-    if ($code -match '(?i)^DDR[0-9]?') {
+    if ($code -match '(?i)^L?P?DDR') {
         return $code
     }
     return 'n/a'
+}
+
+function Test-RsSolderedMemory {
+    param(
+        $FormFactor,
+        $MemoryType
+    )
+
+    $typeText = ([string]$MemoryType).Trim()
+    if ($typeText -match '^(30|31|35|36)$') {
+        return $true
+    }
+    if ($typeText -match '(?i)LPDDR') {
+        return $true
+    }
+    $formText = ([string]$FormFactor).Trim()
+    if ($formText -eq '0') {
+        return $true
+    }
+    if ($formText -match '(?i)Row of chips|Row-of-chips') {
+        return $true
+    }
+    return $false
+}
+
+function Get-RsMemorySlotSummary {
+    param(
+        [int]$Populated,
+        [int]$Soldered,
+        [int]$SlotTotal
+    )
+
+    if ($Populated -gt 0 -and $Soldered -ge $Populated) {
+        return 'Soldered (not upgradeable)'
+    }
+    if ($SlotTotal -gt 0) {
+        return '{0} of {1}' -f $Populated, $SlotTotal
+    }
+    if ($Populated -gt 0) {
+        return '{0} populated, total n/a' -f $Populated
+    }
+    return 'n/a'
+}
+
+function Get-RsMemoryMaxText {
+    param(
+        $MaxGb,
+        $InstalledGb,
+        [bool]$Soldered
+    )
+
+    if ($Soldered) {
+        return 'n/a'
+    }
+    $max = 0.0
+    $installed = 0.0
+    $style = [System.Globalization.NumberStyles]::Float
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    if (-not [double]::TryParse([string]$MaxGb, $style, $culture, [ref]$max) -or $max -le 0) {
+        return 'n/a'
+    }
+    $hasInstalled = [double]::TryParse([string]$InstalledGb, $style, $culture, [ref]$installed)
+    if ($hasInstalled -and $installed -gt 0 -and $max -lt $installed) {
+        return 'n/a'
+    }
+    return $max.ToString($culture)
 }
 
 function ConvertTo-RsMaxRamGb {
@@ -708,6 +889,149 @@ function Get-RsDiskIndex {
     return [int]$found.Groups[2].Value
 }
 
+function Get-RsReferenceText {
+    param($Reference)
+
+    if ($null -eq $Reference) {
+        return ''
+    }
+    if ($Reference -is [string]) {
+        return [string]$Reference
+    }
+    $deviceId = Get-RsProperty -Object $Reference -Name 'DeviceID'
+    if (-not [string]::IsNullOrWhiteSpace([string]$deviceId)) {
+        return [string]$deviceId
+    }
+    return [string]$Reference
+}
+
+function Get-RsVolumeLetter {
+    param([string]$Text)
+
+    $source = [string]$Text
+    if ([string]::IsNullOrWhiteSpace($source)) {
+        return $null
+    }
+    $found = [regex]::Match($source, '(?i)DeviceID\s*=\s*\\?"([A-Z]):')
+    if ($found.Success) {
+        return ($found.Groups[1].Value.ToUpperInvariant() + ':')
+    }
+    $bare = [regex]::Match($source.Trim(), '(?i)^([A-Z]):\\?$')
+    if ($bare.Success) {
+        return ($bare.Groups[1].Value.ToUpperInvariant() + ':')
+    }
+    return $null
+}
+
+function Get-RsDiskLetterMap {
+    param([object[]]$Link)
+
+    $map = @{}
+    foreach ($link in @($Link)) {
+        if ($null -eq $link) {
+            continue
+        }
+        $partitionText = Get-RsReferenceText -Reference (Get-RsProperty -Object $link -Name 'Antecedent')
+        $logicalText = Get-RsReferenceText -Reference (Get-RsProperty -Object $link -Name 'Dependent')
+        $diskIndex = Get-RsDiskIndex -Text $partitionText
+        $letter = Get-RsVolumeLetter -Text $logicalText
+        if ($null -eq $diskIndex -or [string]::IsNullOrWhiteSpace([string]$letter)) {
+            continue
+        }
+        $key = [string][int]$diskIndex
+        if (-not $map.ContainsKey($key)) {
+            $map[$key] = New-Object System.Collections.Generic.List[string]
+        }
+        $map[$key].Add([string]$letter)
+    }
+    return $map
+}
+
+function Get-RsDiskFreeSpace {
+    param(
+        $Index,
+        $LetterMap,
+        $VolumeFree,
+        [int]$DiskCount = 2
+    )
+
+    $letters = New-Object System.Collections.Generic.List[string]
+    $parsed = 0
+    $hasIndex = [int]::TryParse([string]$Index, [ref]$parsed)
+    if ($null -ne $LetterMap) {
+        if ($hasIndex -and $LetterMap.ContainsKey([string]$parsed)) {
+            $chosen = $LetterMap[[string]$parsed]
+            if ($null -ne $chosen) {
+                foreach ($letter in @($chosen.ToArray())) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$letter)) {
+                        $letters.Add([string]$letter)
+                    }
+                }
+            }
+        } elseif ($letters.Count -eq 0 -and $DiskCount -le 1 -and @($LetterMap.Keys).Count -eq 1) {
+            $onlyKey = [string]@($LetterMap.Keys)[0]
+            $chosen = $LetterMap[$onlyKey]
+            if ($null -ne $chosen) {
+                foreach ($letter in @($chosen.ToArray())) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$letter)) {
+                        $letters.Add([string]$letter)
+                    }
+                }
+            }
+        }
+    }
+    $sum = [uint64]0
+    $saw = $false
+    foreach ($letter in @($letters.ToArray())) {
+        if ($null -eq $VolumeFree -or -not $VolumeFree.ContainsKey([string]$letter)) {
+            continue
+        }
+        $part = [uint64]0
+        if ([uint64]::TryParse([string]$VolumeFree[[string]$letter], [ref]$part)) {
+            $sum += $part
+            $saw = $true
+        }
+    }
+    if (-not $saw -and $DiskCount -le 1 -and $null -ne $VolumeFree) {
+        foreach ($key in @($VolumeFree.Keys)) {
+            $part = [uint64]0
+            if ([uint64]::TryParse([string]$VolumeFree[$key], [ref]$part)) {
+                $sum += $part
+                $saw = $true
+            }
+        }
+    }
+    if (-not $saw) {
+        return $null
+    }
+    return $sum
+}
+
+function ConvertTo-RsDiskHealth {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'n/a'
+    }
+    if ($text -eq '0' -or $text -eq 'Healthy') {
+        return 'Healthy'
+    }
+    if ($text -eq '1' -or $text -eq 'Warning') {
+        return 'Warning'
+    }
+    if ($text -eq '2' -or $text -eq 'Unhealthy') {
+        return 'Unhealthy'
+    }
+    if ($text -eq '5' -or $text -eq 'Unknown') {
+        return 'Unknown'
+    }
+    return $text
+}
+
 function ConvertTo-RsLinkSpeed {
     param($BitsPerSecond)
 
@@ -721,6 +1045,10 @@ function ConvertTo-RsLinkSpeed {
     if ($bits -eq 1000000000) { return '1 Gbps' }
     if ($bits -eq 100000000) { return '100 Mbps' }
     if ($bits -eq 10000000) { return '10 Mbps' }
+    # Win32_NetworkAdapter.Speed is Int64.MaxValue when the NIC has no link.
+    if ($bits -eq 9223372036854775807 -or $bits -gt 1000000000000) {
+        return 'no link'
+    }
     if ($bits -ge 1000000000) {
         $gbps = [math]::Round($bits / 1000000000, 1)
         return ($gbps.ToString([System.Globalization.CultureInfo]::InvariantCulture) + ' Gbps')
@@ -816,6 +1144,41 @@ function Test-RsComDevice {
         return $true
     }
     return [bool]($Name -match '(?i)USB[ -]?Serial|Prolific|FTDI|CH34[01]|Serial Adapter')
+}
+
+function Test-RsBuiltInCom {
+    param([string]$PnpDeviceId)
+
+    $id = [string]$PnpDeviceId
+    if ([string]::IsNullOrWhiteSpace($id)) {
+        return $false
+    }
+    return [bool]($id -match '(?i)(^|\\)(\*|ACPI\\)?PNP050[01]\b')
+}
+
+function Test-RsComNeeded {
+    param(
+        [string]$Name,
+        [string]$PnpDeviceId,
+        [bool]$InUse = $false
+    )
+
+    if ($InUse) {
+        return $true
+    }
+    if (Test-RsBuiltInCom -PnpDeviceId $PnpDeviceId) {
+        return $false
+    }
+    $blob = (([string]$Name) + ' ' + ([string]$PnpDeviceId))
+    if ($blob -match '(?i)USB[\\ -]?Serial|Prolific|FTDI|CH34[01]|Serial Adapter|FTDIBUS') {
+        return $true
+    }
+    # Any serial device whose id is not the motherboard UART (ACPI PNP0500/PNP0501).
+    $id = [string]$PnpDeviceId
+    if (-not [string]::IsNullOrWhiteSpace($id) -and $id -match '(?i)^(USB|PCI|FTDIBUS)\\') {
+        return $true
+    }
+    return $false
 }
 
 function Get-RsPrinterKind {
@@ -1091,19 +1454,32 @@ function Get-RsIntelGeneration {
     if ($Name -match '(?i)Core\(TM\)\s+Ultra|Core\s+Ultra') {
         return [pscustomobject]@{ Known = $true; Supported = $true; Detail = 'Intel Core Ultra' }
     }
-    $modelMatch = [regex]::Match([string]$Name, '(?i)Core(?:\(TM\))?\s+i[3579]-(\d{4,5})')
-    if (-not $modelMatch.Success) {
-        return [pscustomobject]@{ Known = $false; Supported = $false; Detail = '' }
-    }
-    $modelText = $modelMatch.Groups[1].Value
-    $model = [int]$modelText
     $generation = 0
-    if ($model -ge 10000) {
-        $generation = [int]$modelText.Substring(0, 2)
-    } elseif ($Name -match '(?i)i[3579]-1\d{3}G\d') {
-        $generation = 10
+    $explicit = [regex]::Match([string]$Name, '(?i)(\d{1,2})(?:st|nd|rd|th)\s+Gen\b')
+    if ($explicit.Success) {
+        $generation = [int]$explicit.Groups[1].Value
     } else {
-        $generation = [int]$modelText.Substring(0, 1)
+        # 5-digit models use the first two digits (10400 is generation 10).
+        # 4-digit models from the 10th generation onward also start with 10-19
+        # (1220P is generation 12). Older 4-digit models use the first digit (8700 is 8).
+        $modelMatch = [regex]::Match([string]$Name, '(?i)i[3579]-(\d{4,5})')
+        if (-not $modelMatch.Success) {
+            return [pscustomobject]@{ Known = $false; Supported = $false; Detail = '' }
+        }
+        $modelText = $modelMatch.Groups[1].Value
+        if ($modelText.Length -ge 5) {
+            $generation = [int]$modelText.Substring(0, 2)
+        } else {
+            $prefix = [int]$modelText.Substring(0, 2)
+            if ($prefix -ge 10 -and $prefix -le 19) {
+                $generation = $prefix
+            } else {
+                $generation = [int]$modelText.Substring(0, 1)
+            }
+        }
+    }
+    if ($generation -le 0) {
+        return [pscustomobject]@{ Known = $false; Supported = $false; Detail = '' }
     }
     return [pscustomobject]@{
         Known     = $true
@@ -1240,7 +1616,9 @@ function Get-RsReplacementNote {
     if ($sawVga) {
         $notes.Add('Needs VGA output')
     }
-    if ($ExternalMonitor -ge 1) {
+    if ($ExternalMonitor -eq 1) {
+        $notes.Add('Uses 1 monitor')
+    } elseif ($ExternalMonitor -ge 2) {
         $notes.Add(('Uses {0} monitors' -f $ExternalMonitor))
     }
     if ($ComPort) {
@@ -2311,9 +2689,10 @@ function Get-RsCollectedSurvey {
             }
             $key = Get-RsMonitorKey -InstanceName (Get-RsProperty -Object $screen -Name 'InstanceName')
             $make = ConvertTo-RsMonitorVendor -Code (ConvertTo-RsAsciiWord -Value (Get-RsProperty -Object $screen -Name 'ManufacturerName'))
+            $productCode = [string](ConvertTo-RsAsciiWord -Value (Get-RsProperty -Object $screen -Name 'ProductCodeID'))
             $friendly = [string](ConvertTo-RsAsciiWord -Value (Get-RsProperty -Object $screen -Name 'UserFriendlyName'))
             if ([string]::IsNullOrWhiteSpace($friendly)) {
-                $friendly = [string](ConvertTo-RsAsciiWord -Value (Get-RsProperty -Object $screen -Name 'ProductCodeID'))
+                $friendly = $productCode
             }
             $screenSerial = ConvertTo-RsAsciiWord -Value (Get-RsProperty -Object $screen -Name 'SerialNumberID')
             $connection = 'n/a'
@@ -2337,18 +2716,19 @@ function Get-RsCollectedSurvey {
                     $friendly = '{0} (made {1})' -f $friendly, $year
                 }
             }
-            if ($connection -ne 'Internal' -and $connection -ne 'LVDS') {
-                $external++
-            }
             $monitorItems.Add([pscustomobject]@{
                 make       = (Format-RsText -Value $make)
                 model      = (Format-RsText -Value $friendly)
+                product    = (Format-RsText -Value $productCode)
                 serial     = (Format-RsText -Value $screenSerial)
                 sizeInch   = $sizeText
                 connection = (Format-RsText -Value $connection)
                 resolution = $resolution
+                outputKey  = $key
             })
         }
+        $monitorItems = Select-RsUniqueMonitor -Monitor @($monitorItems.ToArray())
+        $external = Get-RsExternalMonitorCount -Monitor @($monitorItems.ToArray())
     } catch {
         $problem.Add((Get-RsSectionError -Section 'monitors' -ErrorRecord $_))
         $reportedNames = New-Object System.Collections.Generic.List[string]
@@ -2399,7 +2779,9 @@ function Get-RsCollectedSurvey {
     $modules = @(Get-RsCim -ClassName 'Win32_PhysicalMemory')
     $arrays = @(Get-RsCim -ClassName 'Win32_PhysicalMemoryArray')
     $slotTotal = 0
-    $maxKb = 0.0
+    $maxGb = 0.0
+    $installedBytes = [uint64]0
+    $solderedCount = 0
     foreach ($array in $arrays) {
         if ($null -eq $array) {
             continue
@@ -2412,13 +2794,20 @@ function Get-RsCollectedSurvey {
         if ($null -eq $capacity) {
             $capacity = ConvertTo-RsMaxRamGb -Kilobyte (Get-RsProperty -Object $array -Name 'MaxCapacity')
         }
-        if ($null -ne $capacity -and $capacity -gt $maxKb) {
-            $maxKb = $capacity
+        if ($null -ne $capacity -and $capacity -gt $maxGb) {
+            $maxGb = $capacity
         }
     }
     foreach ($module in $modules) {
         if ($null -eq $module) {
             continue
+        }
+        $moduleBytes = [uint64]0
+        if ([uint64]::TryParse([string](Get-RsProperty -Object $module -Name 'Capacity'), [ref]$moduleBytes)) {
+            $installedBytes += $moduleBytes
+        }
+        if (Test-RsSolderedMemory -FormFactor (Get-RsProperty -Object $module -Name 'FormFactor') -MemoryType (Get-RsProperty -Object $module -Name 'SMBIOSMemoryType')) {
+            $solderedCount++
         }
         $locator = Format-RsText -Value (Get-RsProperty -Object $module -Name 'DeviceLocator')
         if ($locator -eq 'n/a') {
@@ -2435,14 +2824,17 @@ function Get-RsCollectedSurvey {
             speed   = $(if ($null -eq $speed -or [string]$speed -eq '0') { 'n/a' } else { [string]$speed })
         })
     }
-    if ($slotTotal -gt 0) {
-        $slotText = '{0} of {1}' -f $dimmItems.Count, $slotTotal
-    } elseif ($dimmItems.Count -gt 0) {
-        $slotText = '{0} populated, total n/a' -f $dimmItems.Count
+    $allSoldered = ($dimmItems.Count -gt 0 -and $solderedCount -ge $dimmItems.Count)
+    $slotText = Get-RsMemorySlotSummary -Populated $dimmItems.Count -Soldered $solderedCount -SlotTotal $slotTotal
+    $installedGb = $null
+    if ($installedBytes -gt 0) {
+        $installedGb = [math]::Round($installedBytes / 1073741824, 1)
     }
-    if ($maxKb -gt 0) {
-        $maxText = $maxKb.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    $maxArg = $null
+    if ($maxGb -gt 0) {
+        $maxArg = $maxGb
     }
+    $maxText = Get-RsMemoryMaxText -MaxGb $maxArg -InstalledGb $installedGb -Soldered $allSoldered
     } catch {
         $problem.Add((Get-RsSectionError -Section 'memory' -ErrorRecord $_))
         $dimmItems = ConvertTo-RsList
@@ -2453,23 +2845,7 @@ function Get-RsCollectedSurvey {
     $diskItems = ConvertTo-RsList
     $volumeItems = ConvertTo-RsList
     try {
-    $freeByDisk = @{}
-    foreach ($link in @(Get-RsCim -ClassName 'Win32_LogicalDiskToPartition')) {
-        if ($null -eq $link) {
-            continue
-        }
-        $partitionText = [string](Get-RsProperty -Object $link -Name 'Antecedent')
-        $logicalText = [string](Get-RsProperty -Object $link -Name 'Dependent')
-        $diskIndex = Get-RsDiskIndex -Text $partitionText
-        $letterMatch = [regex]::Match($logicalText, 'DeviceID="([A-Z]:)"')
-        if ($null -eq $diskIndex -or -not $letterMatch.Success) {
-            continue
-        }
-        if (-not $freeByDisk.ContainsKey([int]$diskIndex)) {
-            $freeByDisk[[int]$diskIndex] = New-Object System.Collections.Generic.List[string]
-        }
-        $freeByDisk[[int]$diskIndex].Add($letterMatch.Groups[1].Value)
-    }
+    $freeByDisk = Get-RsDiskLetterMap -Link @(Get-RsCim -ClassName 'Win32_LogicalDiskToPartition')
     $volumeFree = @{}
     foreach ($logical in @(Get-RsCim -ClassName 'Win32_LogicalDisk')) {
         if ($null -eq $logical) {
@@ -2479,6 +2855,10 @@ function Get-RsCollectedSurvey {
             continue
         }
         $letter = Format-RsText -Value (Get-RsProperty -Object $logical -Name 'DeviceID')
+        $letterFound = [regex]::Match($letter, '^[A-Za-z]:$')
+        if ($letterFound.Success) {
+            $letter = $letter.ToUpperInvariant()
+        }
         $free = Get-RsProperty -Object $logical -Name 'FreeSpace'
         $size = Get-RsProperty -Object $logical -Name 'Size'
         $volumeFree[$letter] = $free
@@ -2511,31 +2891,14 @@ function Get-RsCollectedSurvey {
         if ([int]::TryParse([string]$indexValue, [ref]$parsedIndex)) {
             $indexNumber = $parsedIndex
         }
-        $freeBytes = $null
-        if ($null -ne $indexNumber -and $freeByDisk.ContainsKey([int]$indexNumber)) {
-            $sum = [uint64]0
-            $saw = $false
-            $letterList = $freeByDisk[[int]$indexNumber]
-            $letters = @()
-            if ($null -ne $letterList) {
-                $letters = @($letterList.ToArray())
-            }
-            foreach ($letter in $letters) {
-                if ($volumeFree.ContainsKey([string]$letter)) {
-                    $part = [uint64]0
-                    if ([uint64]::TryParse([string]$volumeFree[[string]$letter], [ref]$part)) {
-                        $sum += $part
-                        $saw = $true
-                    }
-                }
-            }
-            if ($saw) {
-                $freeBytes = $sum
-            }
+        $freeLookup = $indexValue
+        if ($null -ne $indexNumber) {
+            $freeLookup = $indexNumber
         }
-        $health = Format-RsText -Value (Get-RsProperty -Object $disk -Name 'HealthStatus')
+        $freeBytes = Get-RsDiskFreeSpace -Index $freeLookup -LetterMap $freeByDisk -VolumeFree $volumeFree -DiskCount $physical.Count
+        $health = ConvertTo-RsDiskHealth -Value (Get-RsProperty -Object $disk -Name 'HealthStatus')
         if ($health -eq 'n/a') {
-            $health = Format-RsText -Value (Get-RsProperty -Object $disk -Name 'Status')
+            $health = ConvertTo-RsDiskHealth -Value (Get-RsProperty -Object $disk -Name 'Status')
         }
         $diskItems.Add([pscustomobject]@{
             index  = $(if ($null -eq $indexNumber) { [string]$diskPosition } else { [string]$indexNumber })
@@ -2648,6 +3011,7 @@ function Get-RsCollectedSurvey {
     $thunderbolt = $false
     $usbDevices = ConvertTo-RsList
     $comNames = New-Object System.Collections.Generic.List[string]
+    $comNeeded = $false
     try {
     $usbNames = New-Object System.Collections.Generic.List[string]
     $usbCounts = @{}
@@ -2688,13 +3052,18 @@ function Get-RsCollectedSurvey {
             continue
         }
         $comName = Format-RsText -Value (Get-RsProperty -Object $com -Name 'DeviceID')
+        $comPnp = [string](Get-RsProperty -Object $com -Name 'PNPDeviceID')
         if ($comName -ne 'n/a') {
             $comNames.Add($comName)
         }
+        if (Test-RsComNeeded -Name $comName -PnpDeviceId $comPnp) {
+            $comNeeded = $true
+        }
     }
     foreach ($deviceName in $usbDevices) {
-        if (Test-RsComDevice -Name ([string]$deviceName)) {
+        if (Test-RsComNeeded -Name ([string]$deviceName) -PnpDeviceId '') {
             $comNames.Add([string]$deviceName)
+            $comNeeded = $true
         }
     }
     foreach ($parallel in @(Get-RsCim -ClassName 'Win32_ParallelPort')) {
@@ -2733,6 +3102,7 @@ function Get-RsCollectedSurvey {
         $thunderbolt = $false
         $usbDevices = ConvertTo-RsList
         $comNames = New-Object System.Collections.Generic.List[string]
+        $comNeeded = $false
     }
 
     $printerItems = ConvertTo-RsList
@@ -2907,7 +3277,22 @@ function Get-RsCollectedSurvey {
         if ($null -ne $form) {
             $formSize = [string]$form.Size
         }
-        $notes = @(Get-RsReplacementNote -VideoOutput @($reportedNames) -ExternalMonitor $external -VgaConnected $vga -ComPort ($comNames.Count -gt 0) -Wifi ($wifiItems.Count -gt 0) -DedicatedGpu $dedicated -ImagingSoftware $imaging -FormFactor $formSize -Thunderbolt $thunderbolt -BatteryHealth $batteryHealth)
+        if ($null -ne $printerItems) {
+            foreach ($printer in $printerItems) {
+                if ($null -eq $printer) {
+                    continue
+                }
+                $printerPort = [string]$printer.port
+                $portInUse = $false
+                if ($printerPort -match '(?i)^COM\d+') {
+                    $portInUse = $true
+                }
+                if (Test-RsComNeeded -Name $printerPort -PnpDeviceId '' -InUse $portInUse) {
+                    $comNeeded = $true
+                }
+            }
+        }
+        $notes = @(Get-RsReplacementNote -VideoOutput @($reportedNames) -ExternalMonitor $external -VgaConnected $vga -ComPort $comNeeded -Wifi ($wifiItems.Count -gt 0) -DedicatedGpu $dedicated -ImagingSoftware $imaging -FormFactor $formSize -Thunderbolt $thunderbolt -BatteryHealth $batteryHealth)
     } catch {
         $problem.Add((Get-RsSectionError -Section 'notes' -ErrorRecord $_))
         $notes = @()

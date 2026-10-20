@@ -10,7 +10,8 @@ BeforeAll {
         'Test-PendingReboot.ps1',
         'Get-WindowsUpdateStatus.ps1',
         'Test-ImagingBridge.ps1',
-        'Get-LocalAdminAudit.ps1'
+        'Get-LocalAdminAudit.ps1',
+        'Get-ReplacementSurvey.ps1'
     )
 }
 
@@ -32,6 +33,7 @@ Describe 'Tactical script contract' {
         @{ Name = 'Get-WindowsUpdateStatus.ps1' }
         @{ Name = 'Test-ImagingBridge.ps1' }
         @{ Name = 'Get-LocalAdminAudit.ps1' }
+        @{ Name = 'Get-ReplacementSurvey.ps1' }
     ) {
         $path = Join-Path $script:Root $Name
         $tokens = $null
@@ -77,6 +79,7 @@ Describe 'Tactical script contract' {
         @{ Name = 'Get-WindowsUpdateStatus.ps1' }
         @{ Name = 'Test-ImagingBridge.ps1' }
         @{ Name = 'Get-LocalAdminAudit.ps1' }
+        @{ Name = 'Get-ReplacementSurvey.ps1' }
     ) {
         $path = Join-Path $script:Root $Name
         $output = & pwsh -NoProfile -NonInteractive -File $path 2>&1 | Out-String

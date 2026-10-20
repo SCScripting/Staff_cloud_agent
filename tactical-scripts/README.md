@@ -43,6 +43,7 @@ Default arguments are optional. Switches are off unless you add them, for exampl
 | `Get-WindowsUpdateStatus.ps1` | Last quality-update install and the pending software-update count. Definition updates are excluded. Does not install updates. | `-MaxPending` (default `0`), `-MaxDaysSinceInstall` (default `45`) | Pending count and install age are within limits | Too many pending updates, or the last install is too old | Pending count or history could not be queried | 1200 seconds |
 | `Test-ImagingBridge.ps1` | Reports Clever One, EzDent-i, Ez3D-i, EzServer, and other imaging apps. Fails when Clever One and EzDent-i are both installed. | None | No Clever One / EzDent-i conflict | Both bridges are installed | Uninstall registry could not be read | 120 seconds |
 | `Get-LocalAdminAudit.ps1` | Lists local Administrators. RID 500 and Domain Admins (RID 512) are expected. | `-AllowedPrincipal`, `-FailOnBuiltInAdminEnabled` | Every member is expected | An unexpected admin is present | The group could not be enumerated | 120 seconds |
+| `Get-ReplacementSurvey.ps1` | Read-only survey for a replacement PC or server. Prints a summary, then one JSON line, and saves both under ProgramData. | `-OutputPath` | Survey collected and both files saved | Survey collected, but a file could not be saved | Computer and OS details could not be read, or the host is not Windows | 300 seconds |
 
 GB in these scripts is a gibibyte (`1024^3`), which is what PowerShell means by `GB`.
 
@@ -110,6 +111,18 @@ Reads both 32-bit and 64-bit HKLM uninstall keys and reports version, publisher,
 
 Enumerates the local Administrators group (SID `S-1-5-32-544`) through ADSI, and falls back to CIM if ADSI throws. Built-in Administrator (any SID ending in `-500`) and Domain Admins (SID ending in `-512`) are expected. Add MSP accounts with `-AllowedPrincipal 'CONTOSO\Tech'`. A value without a slash matches the account name only. `-FailOnBuiltInAdminEnabled` fails the audit when the RID 500 user is enabled. The script does not remove anyone.
 
+### Replacement survey
+
+Collects the facts a tech needs to order a replacement workstation or server: identity, form factor, display outputs, monitors, GPU and VRAM, CPU, RAM, disks, network, USB and COM ports, connected USB devices, printers, OS, dental software, and laptop battery health. It is read-only. It does not prompt. Tactical runs it as SYSTEM. SimpleHelp can run it as SYSTEM or as an administrator. Registry reads use the 64-bit view, so a 32-bit PowerShell host still sees 64-bit uninstall keys and `qwMemorySize`.
+
+Stdout is the full summary, then one compact JSON line, then `EXITCODE: N`. Tactical and SimpleHelp both show stdout. The same summary is written to a `.txt` file and the JSON line to a `.json` file. The default folder is `C:\ProgramData\StandardComputer\Survey`, created if needed. The names are `<COMPUTERNAME>_<yyyyMMdd>.txt` and `.json`. Characters outside letters, digits, `.`, `_`, and `-` in the computer name become `_`. Running it again the same day overwrites those two files.
+
+`-OutputPath` overrides that location. A directory, including one with a trailing slash, keeps the default file names. A path that ends in `.json` or `.txt` uses that base name for both files.
+
+Ship dates from an HP serial, a Dell PPID, or the SMBIOS BIOS release date are labeled estimates. Lenovo serials are not decoded. GPU port counts taken from the model name are labeled estimated and are not treated as connected ports. A `Needs VGA output` note is set only when VGA is reported or a monitor is connected with VGA. `Uses N monitors` counts external monitors. `Dedicated GPU required (CBCT)` is set only when a dedicated GPU and imaging software are both present. Windows 11 readiness is informational and does not change the survey exit code.
+
+Exit `1` means the summary and JSON were still printed, but saving a file failed. Exit `2` means the host is not Windows, or both the computer and the operating system could not be read. Missing WMI values stay `n/a` and are listed as collection gaps; they still exit `0` when the files save.
+
 ## Checks that could not be executed here
 
 CI runs on Linux. It parses every script, runs PSScriptAnalyzer for errors, and runs Pester against the decision logic (thresholds, CPU heuristic, VRAM registry selection, Office XML, imaging conflict, admin allow list, reboot signals, JSON shape). It does not have a Windows disk, TPM, Office Click-to-Run, Windows Update Agent, or Tactical agent. These paths still need a Windows 10/11 or Server machine:
@@ -123,3 +136,4 @@ CI runs on Linux. It parses every script, runs PSScriptAnalyzer for errors, and 
 - HKLM uninstall entries and Vatech / Clever One service image paths
 - ADSI local-group enumeration, including orphaned SIDs and a renamed built-in Administrator
 - JSON field population from WMI on a physical dental PC
+- `Get-ReplacementSurvey.ps1` live WMI, EDID, display-config, and `C:\ProgramData\StandardComputer\Survey` writes. Chassis, port, serial-date, software, note, path, and JSON mapping are covered by Pester.

@@ -728,7 +728,7 @@ function Format-RsGpuLine {
     $name = Format-RsText -Value (Get-RsProperty -Object $Gpu -Name 'name')
     $kind = Format-RsText -Value (Get-RsProperty -Object $Gpu -Name 'kind')
     if ($kind -eq 'integrated') {
-        return ('{0} (integrated) Shared memory (integrated)' -f $name)
+        return ('{0} Shared memory (integrated)' -f $name)
     }
     $vram = Format-RsText -Value (Get-RsProperty -Object $Gpu -Name 'vram')
     $source = Format-RsText -Value (Get-RsProperty -Object $Gpu -Name 'vramSource')
@@ -2697,7 +2697,9 @@ function Get-RsCollectedSurvey {
                 }
             }
             $vramText = 'n/a'
-            if ($bytes -gt 0) {
+            if ($kind -eq 'integrated') {
+                $vramText = 'Shared memory (integrated)'
+            } elseif ($bytes -gt 0) {
                 $vramGb = [math]::Round(($bytes / 1073741824), 1)
                 $vramText = $vramGb.ToString([System.Globalization.CultureInfo]::InvariantCulture)
             }

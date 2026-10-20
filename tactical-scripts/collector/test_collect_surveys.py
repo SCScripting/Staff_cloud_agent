@@ -248,6 +248,60 @@ class CollectTests(unittest.TestCase):
         )
         self.assertIn("free n/a", missing["disks"])
 
+    def test_integrated_gpu_column_matches_shared_memory_field(self):
+        saved = collector.flatten_survey(
+            {"agent_id": "a", "hostname": "SC-BLINK-TV04", "client": "c", "site": "s"},
+            {
+                "display": {
+                    "gpu": [
+                        {
+                            "name": "Intel(R) UHD Graphics",
+                            "kind": "integrated",
+                            "vram": "Shared memory (integrated)",
+                            "vramSource": "n/a",
+                        }
+                    ]
+                }
+            },
+            "history",
+            "",
+        )
+        self.assertEqual(saved["gpus"], "Intel(R) UHD Graphics Shared memory (integrated)")
+        older = collector.flatten_survey(
+            {"agent_id": "a", "hostname": "SC-BLINK-TV04", "client": "c", "site": "s"},
+            {
+                "display": {
+                    "gpu": [
+                        {
+                            "name": "Intel(R) UHD Graphics",
+                            "kind": "integrated",
+                            "vram": "n/a",
+                        }
+                    ]
+                }
+            },
+            "history",
+            "",
+        )
+        self.assertEqual(older["gpus"], "Intel(R) UHD Graphics Shared memory (integrated)")
+        dedicated = collector.flatten_survey(
+            {"agent_id": "a", "hostname": "PC", "client": "c", "site": "s"},
+            {
+                "display": {
+                    "gpu": [
+                        {
+                            "name": "NVIDIA GeForce RTX 3060",
+                            "kind": "dedicated",
+                            "vram": "8",
+                        }
+                    ]
+                }
+            },
+            "history",
+            "",
+        )
+        self.assertEqual(dedicated["gpus"], "NVIDIA GeForce RTX 3060 dedicated 8")
+
     def test_missing_history_stays_read_only_without_run(self):
         routes = dict(self.client_routes)
         routes[("GET", "/agents/scripthistory/")] = []

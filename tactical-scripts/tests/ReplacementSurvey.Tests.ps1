@@ -561,7 +561,7 @@ Describe 'Replacement survey accuracy' {
     It 'prints shared memory for an integrated GPU and estimated physical ports when known' {
         Format-RsGpuLine -Gpu ([pscustomobject]@{
             name = 'Intel(R) UHD Graphics'; kind = 'integrated'; vram = 'n/a'; vramSource = 'n/a'
-        }) | Should -Be 'Intel(R) UHD Graphics (integrated) Shared memory (integrated)'
+        }) | Should -Be 'Intel(R) UHD Graphics Shared memory (integrated)'
         Format-RsGpuLine -Gpu ([pscustomobject]@{
             name = 'NVIDIA GeForce RTX 3060'; kind = 'dedicated'; vram = '8'; vramSource = 'qwMemorySize'
         }) | Should -Be 'NVIDIA GeForce RTX 3060 (dedicated) VRAM 8 via qwMemorySize'
@@ -750,8 +750,10 @@ Describe 'Replacement survey accuracy' {
         $summary = Format-RsSummary -Survey $survey
         $summary | Should -Match 'Connections in use: HDMI x1'
         $summary | Should -Not -Match 'Physical ports:'
-        $summary | Should -Match 'Shared memory \(integrated\)'
+        $summary | Should -Match 'Intel\(R\) UHD Graphics Shared memory \(integrated\)'
+        $summary | Should -Not -Match '\(integrated\) Shared memory'
         $summary | Should -Not -Match 'VRAM n/a via n/a'
+        [string]$survey.display.gpu[0].vram | Should -Be 'Shared memory (integrated)'
         $summary | Should -Not -Match 'Estimated ports:'
         $survey.port.com | Should -Be 'COM1'
         $survey.note | Should -Contain 'Uses 1 monitor'

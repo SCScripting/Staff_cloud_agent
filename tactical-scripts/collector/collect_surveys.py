@@ -343,6 +343,27 @@ def _measure(item, key, suffix):
     return text + suffix
 
 
+def _gpu_text(item):
+    """Match the survey GPU line. Integrated graphics store the shared-memory phrase."""
+    if not isinstance(item, dict):
+        return _text(item)
+    name = _text(_value(item, "name"))
+    kind = _text(_value(item, "kind")).casefold()
+    vram = _text(_value(item, "vram"))
+    if kind == "integrated" or vram.casefold().startswith("shared memory"):
+        memory = vram if vram.casefold().startswith("shared memory") else "Shared memory (integrated)"
+        return " ".join(part for part in (name, memory) if part)
+    return " ".join(
+        part
+        for part in (
+            name,
+            _text(_value(item, "kind")),
+            vram,
+        )
+        if part
+    )
+
+
 def _disk_free(item):
     if not isinstance(item, dict):
         return ""
@@ -389,18 +410,7 @@ def flatten_survey(agent, survey, source, history_time):
             "form_factor": _text(_value(form, "size")),
             "form_detail": _text(_value(form, "detail")),
             "display_outputs": _text(display.get("reported")),
-            "gpus": _join(
-                display.get("gpu"),
-                lambda item: " ".join(
-                    part
-                    for part in (
-                        _field(item, "name"),
-                        _field(item, "kind"),
-                        _field(item, "vram"),
-                    )
-                    if part
-                ),
-            ),
+            "gpus": _join(display.get("gpu"), _gpu_text),
             "monitor_count": _text(monitor.get("count")),
             "external_monitors": _text(monitor.get("external")),
             "monitors": _join(

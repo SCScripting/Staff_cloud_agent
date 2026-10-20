@@ -304,6 +304,19 @@ def _text(value):
     return str(value)
 
 
+def _value(mapping, key):
+    """Read a survey field by name. PowerShell property names may be Size or size."""
+    if not isinstance(mapping, dict) or key is None:
+        return None
+    if key in mapping:
+        return mapping[key]
+    wanted = str(key).casefold()
+    for name, value in mapping.items():
+        if str(name).casefold() == wanted:
+            return value
+    return None
+
+
 def _join(items, render):
     if isinstance(items, str):
         return items
@@ -328,6 +341,38 @@ def _measure(item, key, suffix):
     if not text or text == "n/a":
         return text
     return text + suffix
+
+
+def _gpu_text(item):
+    """Match the survey GPU line. Integrated graphics store the shared-memory phrase."""
+    if not isinstance(item, dict):
+        return _text(item)
+    name = _text(_value(item, "name"))
+    kind = _text(_value(item, "kind")).casefold()
+    vram = _text(_value(item, "vram"))
+    if kind == "integrated" or vram.casefold().startswith("shared memory"):
+        memory = vram if vram.casefold().startswith("shared memory") else "Shared memory (integrated)"
+        return " ".join(part for part in (name, memory) if part)
+    return " ".join(
+        part
+        for part in (
+            name,
+            _text(_value(item, "kind")),
+            vram,
+        )
+        if part
+    )
+
+
+def _disk_free(item):
+    if not isinstance(item, dict):
+        return ""
+    text = _text(_value(item, "free"))
+    if not text:
+        return ""
+    if text == "n/a":
+        return "free n/a"
+    return "free " + text + " GB"
 
 
 def flatten_survey(agent, survey, source, history_time):
@@ -362,21 +407,10 @@ def flatten_survey(agent, survey, source, history_time):
             "bios_date": _text(identity.get("biosDate")),
             "smbios_version": _text(identity.get("smbiosVersion")),
             "ship_date": _text(identity.get("shipDate")),
-            "form_factor": _text(form.get("size")),
-            "form_detail": _text(form.get("detail")),
+            "form_factor": _text(_value(form, "size")),
+            "form_detail": _text(_value(form, "detail")),
             "display_outputs": _text(display.get("reported")),
-            "gpus": _join(
-                display.get("gpu"),
-                lambda item: " ".join(
-                    part
-                    for part in (
-                        _field(item, "name"),
-                        _field(item, "kind"),
-                        _field(item, "vram"),
-                    )
-                    if part
-                ),
-            ),
+            "gpus": _join(display.get("gpu"), _gpu_text),
             "monitor_count": _text(monitor.get("count")),
             "external_monitors": _text(monitor.get("external")),
             "monitors": _join(
@@ -429,6 +463,7 @@ def flatten_survey(agent, survey, source, history_time):
                         _measure(item, "size", " GB"),
                         _field(item, "media"),
                         _field(item, "health"),
+                        _disk_free(item),
                     )
                     if part
                 ),

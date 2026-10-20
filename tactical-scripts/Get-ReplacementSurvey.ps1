@@ -20,9 +20,13 @@
     64-bit view so a 32-bit PowerShell host still sees 64-bit software and
     qwMemorySize.
 
-    Unknown text is n/a. A queried list that is empty is none. Ship dates
-    decoded from a BIOS release date or a vendor serial are labeled estimates.
-    GPU port layouts taken from the model name are labeled estimated.
+    Unknown text is n/a. A queried list that is empty is none. Each survey
+    section runs in its own try/catch. A probe that throws records n/a for
+    that section and a collection gap named "<section>: line <number>:
+    <message>". One failed probe does not abort the rest of the survey.
+    Ship dates decoded from a BIOS release date or a vendor serial are
+    labeled estimates. GPU port layouts taken from the model name are
+    labeled estimated.
 
     Parameters:
       -OutputPath  Optional file or directory for the saved .txt and .json.
@@ -40,6 +44,7 @@
       0  The survey was collected and both files were saved.
       1  The survey was collected, but a file could not be saved.
       2  The survey could not be collected.
+    The process exit code is the same number printed on the EXITCODE line.
 
 .EXAMPLE
     .\Get-ReplacementSurvey.ps1
@@ -144,7 +149,10 @@ function ConvertTo-RsList {
             $list.Add($entry)
         }
     }
-    Write-Output -NoEnumerate -InputObject $list
+    # Windows PowerShell 5.1 returns $null from Write-Output -NoEnumerate
+    # when this list is empty, and the caller's .Add() then throws.
+    # The unary comma returns the list itself, empty or not.
+    return ,$list
 }
 
 function ConvertTo-RsChassisName {
@@ -189,7 +197,10 @@ function Get-RsModelChassisHint {
     if ([string]::IsNullOrWhiteSpace($Model)) {
         return $null
     }
-    if ($Model -match '(?i)\b(NUC|USFF|Micro|Tiny|Elite\s*Mini|ProDesk\s*Mini|ThinkCentre\s*Tiny|OptiPlex\s*Micro|Mini\s*PC)\b') {
+    if ($Model -match '(?i)\bMini\s*Tower\b') {
+        return 'Large'
+    }
+    if ($Model -match '(?i)(\bEQ\b|\bNUC\b|\bUSFF\b|\bMicro\b|\bTiny\b|\bMini\b|Elite\s*Mini|ProDesk\s*Mini|ThinkCentre\s*Tiny|OptiPlex\s*Micro|Mini\s*PC)') {
         return 'Small'
     }
     if ($Model -match '(?i)\b(SFF|Small\s*Form\s*Factor)\b') {
@@ -210,11 +221,40 @@ function Get-RsModelChassisHint {
     return $null
 }
 
+function Test-RsCompactChassis {
+    param(
+        $WidthInch,
+        $HeightInch,
+        $DepthInch
+    )
+
+    $width = 0.0
+    $height = 0.0
+    $depth = 0.0
+    $style = [System.Globalization.NumberStyles]::Float
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    $widthOk = [double]::TryParse([string]$WidthInch, $style, $culture, [ref]$width)
+    $heightOk = [double]::TryParse([string]$HeightInch, $style, $culture, [ref]$height)
+    $depthOk = [double]::TryParse([string]$DepthInch, $style, $culture, [ref]$depth)
+    if (-not $widthOk -or -not $heightOk -or -not $depthOk) {
+        return $false
+    }
+    if ($width -le 0 -or $height -le 0 -or $depth -le 0) {
+        return $false
+    }
+    # About 3.3 liters. A NUC or AZW EQ fits. An SFF desktop does not.
+    $volume = $width * $height * $depth
+    return ($volume -le 200)
+}
+
 function Get-RsFormFactor {
     param(
         $ChassisType,
         [string]$Model,
-        $PcSystemType
+        $PcSystemType,
+        $WidthInch,
+        $HeightInch,
+        $DepthInch
     )
 
     $chosen = $null
@@ -235,9 +275,20 @@ function Get-RsFormFactor {
     $size = [string]$chosen.Size
     $name = [string]$chosen.Name
     $fixed = @('Laptop', 'All-in-one', 'Rack server')
-    $hint = Get-RsModelChassisHint -Model $Model
+    $modelHint = Get-RsModelChassisHint -Model $Model
+    $dimensionHint = $null
+    if (Test-RsCompactChassis -WidthInch $WidthInch -HeightInch $HeightInch -DepthInch $DepthInch) {
+        $dimensionHint = 'Small'
+    }
+    $hint = $modelHint
+    if ([string]::IsNullOrWhiteSpace($hint)) {
+        $hint = $dimensionHint
+    }
     if ($fixed -notcontains $size -and -not [string]::IsNullOrWhiteSpace($hint)) {
         $size = $hint
+    }
+    if ($size -eq 'Small' -and @('Desktop', 'Unknown', 'Other') -contains $name) {
+        $name = 'Mini PC'
     }
     if ($size -eq 'Other' -and [string]$PcSystemType -eq '2') {
         $size = 'Laptop'
@@ -245,13 +296,15 @@ function Get-RsFormFactor {
     }
 
     $detail = $name
-    if (-not [string]::IsNullOrWhiteSpace($hint) -and $hint -eq $size -and $name -ne $size) {
-        $detail = '{0}; model indicates {1}' -f $name, $hint
+    if (-not [string]::IsNullOrWhiteSpace($modelHint) -and $modelHint -eq $size -and $name -ne $size) {
+        $detail = '{0}; model indicates {1}' -f $name, $modelHint
+    } elseif ([string]::IsNullOrWhiteSpace($modelHint) -and $dimensionHint -eq $size -and $name -ne $size) {
+        $detail = '{0}; dimensions indicate {1}' -f $name, $dimensionHint
     }
     return [pscustomobject]@{
-        Size   = $size
-        Name   = $name
-        Detail = $detail
+        size   = $size
+        name   = $name
+        detail = $detail
     }
 }
 
@@ -343,7 +396,7 @@ function Get-RsOutputHint {
             }
         }
     }
-    return @($found)
+    return @($found.ToArray())
 }
 
 function Get-RsGpuOutputEstimate {
@@ -496,7 +549,17 @@ function ConvertTo-RsAsciiWord {
             $chars.Add([char]$number)
         }
     }
-    return (-join $chars).Trim()
+    # WmiMonitorID stores a blank name as a UInt16 array of zeros, not $null.
+    # Windows PowerShell 5.1 returns $null from -join of an empty collection,
+    # and calling Trim() on that null aborts the survey.
+    if ($chars.Count -eq 0) {
+        return ''
+    }
+    $text = -join @($chars.ToArray())
+    if ([string]::IsNullOrEmpty($text)) {
+        return ''
+    }
+    return $text.Trim()
 }
 
 function Get-RsMonitorKey {
@@ -507,6 +570,172 @@ function Get-RsMonitorKey {
         return $found.Groups[1].Value.ToUpperInvariant()
     }
     return ([string]$InstanceName).ToUpperInvariant()
+}
+
+function Test-RsPlaceholderSerial {
+    param([string]$Serial)
+
+    $text = ([string]$Serial).Trim()
+    if ([string]::IsNullOrWhiteSpace($text) -or $text -eq 'n/a') {
+        return $false
+    }
+    $compact = ([regex]::Replace($text, '[^A-Fa-f0-9]', '')).ToUpperInvariant()
+    if ($compact -eq '16843009' -or $compact -eq '01010101') {
+        return $true
+    }
+    if ($compact.Length -ge 4 -and $compact -match '^(.)\1+$') {
+        return $true
+    }
+    if ($compact -match '^(00)+$' -or $compact -match '^(01)+$') {
+        return $true
+    }
+    return $false
+}
+
+function Format-RsMonitorSerial {
+    param([string]$Serial)
+
+    $text = Format-RsText -Value $Serial
+    if ($text -eq 'n/a') {
+        return 'n/a'
+    }
+    if (Test-RsPlaceholderSerial -Serial $text) {
+        return ($text + ' (placeholder)')
+    }
+    return $text
+}
+
+function Get-RsMonitorIdentity {
+    param(
+        [string]$Make,
+        [string]$Model,
+        [string]$Product,
+        [string]$Serial
+    )
+
+    $modelText = [regex]::Replace([string]$Model, '(?i)\s*\(made\s+\d{4}\)\s*$', '')
+    $serialText = [regex]::Replace([string]$Serial, '(?i)\s*\(placeholder\)\s*$', '')
+    return ('{0}|{1}|{2}|{3}' -f $Make.Trim().ToUpperInvariant(), $modelText.Trim().ToUpperInvariant(), ([string]$Product).Trim().ToUpperInvariant(), $serialText.Trim().ToUpperInvariant())
+}
+
+function Select-RsUniqueMonitor {
+    param([object[]]$Monitor)
+
+    $kept = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($item in @($Monitor)) {
+        if ($null -eq $item) {
+            continue
+        }
+        $identity = Get-RsMonitorIdentity -Make ([string]$item.make) -Model ([string]$item.model) -Product ([string]$item.product) -Serial ([string]$item.serial)
+        $outputKey = [string]$item.outputKey
+        $connection = [string]$item.connection
+        if ([string]::IsNullOrWhiteSpace($connection)) {
+            $connection = 'n/a'
+        }
+        if (-not $seen.ContainsKey($identity)) {
+            $seen[$identity] = New-Object System.Collections.Generic.List[object]
+        }
+        $duplicate = $false
+        foreach ($prior in @($seen[$identity].ToArray())) {
+            $priorKey = [string]$prior.outputKey
+            $priorConn = [string]$prior.connection
+            if ([string]::IsNullOrWhiteSpace($priorConn)) {
+                $priorConn = 'n/a'
+            }
+            $sameKey = (-not [string]::IsNullOrWhiteSpace($outputKey) -and $outputKey -eq $priorKey)
+            $sameLabel = ($connection -ne 'n/a' -and $connection -eq $priorConn)
+            if ($sameKey -or $sameLabel) {
+                $duplicate = $true
+                break
+            }
+        }
+        if ($duplicate) {
+            continue
+        }
+        $seen[$identity].Add($item)
+        $kept.Add([pscustomobject]@{
+            make       = (Format-RsText -Value $item.make)
+            model      = (Format-RsText -Value $item.model)
+            product    = (Format-RsText -Value $item.product)
+            serial     = (Format-RsMonitorSerial -Serial ([string]$item.serial))
+            sizeInch   = (Format-RsText -Value $item.sizeInch)
+            connection = (Format-RsText -Value $connection)
+            resolution = (Format-RsText -Value $item.resolution)
+        })
+    }
+    return ,$kept
+}
+
+function Get-RsExternalMonitorCount {
+    param([object[]]$Monitor)
+
+    $count = 0
+    foreach ($item in @($Monitor)) {
+        if ($null -eq $item) {
+            continue
+        }
+        $connection = [string]$item.connection
+        if ($connection -ne 'Internal' -and $connection -ne 'LVDS') {
+            $count++
+        }
+    }
+    return $count
+}
+
+function Get-RsActiveConnection {
+    param([object[]]$Monitor)
+
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @($Monitor)) {
+        if ($null -eq $item) {
+            continue
+        }
+        $connection = Format-RsText -Value (Get-RsProperty -Object $item -Name 'connection')
+        if ($connection -eq 'n/a') {
+            continue
+        }
+        $names.Add($connection)
+    }
+    return ,$names
+}
+
+function Get-RsPhysicalPort {
+    param([object[]]$Gpu)
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @($Gpu)) {
+        if ($null -eq $item) {
+            continue
+        }
+        $estimated = Format-RsText -Value (Get-RsProperty -Object $item -Name 'estimated')
+        if ($estimated -eq 'n/a') {
+            continue
+        }
+        if (-not $parts.Contains($estimated)) {
+            $parts.Add($estimated)
+        }
+    }
+    if ($parts.Count -eq 0) {
+        return 'n/a'
+    }
+    return ($parts -join ', ')
+}
+
+function Format-RsGpuLine {
+    param($Gpu)
+
+    $name = Format-RsText -Value (Get-RsProperty -Object $Gpu -Name 'name')
+    $kind = Format-RsText -Value (Get-RsProperty -Object $Gpu -Name 'kind')
+    if ($kind -eq 'integrated') {
+        return ('{0} Shared memory (integrated)' -f $name)
+    }
+    $vram = Format-RsText -Value (Get-RsProperty -Object $Gpu -Name 'vram')
+    $source = Format-RsText -Value (Get-RsProperty -Object $Gpu -Name 'vramSource')
+    if ($source -eq 'n/a') {
+        return ('{0} ({1}) VRAM {2}' -f $name, $kind, $vram)
+    }
+    return ('{0} ({1}) VRAM {2} via {3}' -f $name, $kind, $vram, $source)
 }
 
 function Test-RsDedicatedGpu {
@@ -584,15 +813,85 @@ function ConvertTo-RsMemoryType {
         '22' = 'DDR2 FB-DIMM'
         '24' = 'DDR3'
         '26' = 'DDR4'
+        '30' = 'LPDDR4'
+        '31' = 'LPDDR4X'
         '34' = 'DDR5'
+        '35' = 'LPDDR5'
+        '36' = 'LPDDR5X'
     }
     if ($map.ContainsKey($code)) {
         return [string]$map[$code]
     }
-    if ($code -match '(?i)^DDR[0-9]?') {
+    if ($code -match '(?i)^L?P?DDR') {
         return $code
     }
     return 'n/a'
+}
+
+function Test-RsSolderedMemory {
+    param(
+        $FormFactor,
+        $MemoryType
+    )
+
+    $typeText = ([string]$MemoryType).Trim()
+    if ($typeText -match '^(30|31|35|36)$') {
+        return $true
+    }
+    if ($typeText -match '(?i)LPDDR') {
+        return $true
+    }
+    $formText = ([string]$FormFactor).Trim()
+    if ($formText -eq '0') {
+        return $true
+    }
+    if ($formText -match '(?i)Row of chips|Row-of-chips') {
+        return $true
+    }
+    return $false
+}
+
+function Get-RsMemorySlotSummary {
+    param(
+        [int]$Populated,
+        [int]$Soldered,
+        [int]$SlotTotal
+    )
+
+    if ($Populated -gt 0 -and $Soldered -ge $Populated) {
+        return 'Soldered (not upgradeable)'
+    }
+    if ($SlotTotal -gt 0) {
+        return '{0} of {1}' -f $Populated, $SlotTotal
+    }
+    if ($Populated -gt 0) {
+        return '{0} populated, total n/a' -f $Populated
+    }
+    return 'n/a'
+}
+
+function Get-RsMemoryMaxText {
+    param(
+        $MaxGb,
+        $InstalledGb,
+        [bool]$Soldered
+    )
+
+    if ($Soldered) {
+        return 'n/a'
+    }
+    $max = 0.0
+    $installed = 0.0
+    $style = [System.Globalization.NumberStyles]::Float
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    if (-not [double]::TryParse([string]$MaxGb, $style, $culture, [ref]$max) -or $max -le 0) {
+        return 'n/a'
+    }
+    $hasInstalled = [double]::TryParse([string]$InstalledGb, $style, $culture, [ref]$installed)
+    if ($hasInstalled -and $installed -gt 0 -and $max -lt $installed) {
+        return 'n/a'
+    }
+    return $max.ToString($culture)
 }
 
 function ConvertTo-RsMaxRamGb {
@@ -645,6 +944,149 @@ function Get-RsDiskIndex {
     return [int]$found.Groups[2].Value
 }
 
+function Get-RsReferenceText {
+    param($Reference)
+
+    if ($null -eq $Reference) {
+        return ''
+    }
+    if ($Reference -is [string]) {
+        return [string]$Reference
+    }
+    $deviceId = Get-RsProperty -Object $Reference -Name 'DeviceID'
+    if (-not [string]::IsNullOrWhiteSpace([string]$deviceId)) {
+        return [string]$deviceId
+    }
+    return [string]$Reference
+}
+
+function Get-RsVolumeLetter {
+    param([string]$Text)
+
+    $source = [string]$Text
+    if ([string]::IsNullOrWhiteSpace($source)) {
+        return $null
+    }
+    $found = [regex]::Match($source, '(?i)DeviceID\s*=\s*\\?"([A-Z]):')
+    if ($found.Success) {
+        return ($found.Groups[1].Value.ToUpperInvariant() + ':')
+    }
+    $bare = [regex]::Match($source.Trim(), '(?i)^([A-Z]):\\?$')
+    if ($bare.Success) {
+        return ($bare.Groups[1].Value.ToUpperInvariant() + ':')
+    }
+    return $null
+}
+
+function Get-RsDiskLetterMap {
+    param([object[]]$Link)
+
+    $map = @{}
+    foreach ($link in @($Link)) {
+        if ($null -eq $link) {
+            continue
+        }
+        $partitionText = Get-RsReferenceText -Reference (Get-RsProperty -Object $link -Name 'Antecedent')
+        $logicalText = Get-RsReferenceText -Reference (Get-RsProperty -Object $link -Name 'Dependent')
+        $diskIndex = Get-RsDiskIndex -Text $partitionText
+        $letter = Get-RsVolumeLetter -Text $logicalText
+        if ($null -eq $diskIndex -or [string]::IsNullOrWhiteSpace([string]$letter)) {
+            continue
+        }
+        $key = [string][int]$diskIndex
+        if (-not $map.ContainsKey($key)) {
+            $map[$key] = New-Object System.Collections.Generic.List[string]
+        }
+        $map[$key].Add([string]$letter)
+    }
+    return $map
+}
+
+function Get-RsDiskFreeSpace {
+    param(
+        $Index,
+        $LetterMap,
+        $VolumeFree,
+        [int]$DiskCount = 2
+    )
+
+    $letters = New-Object System.Collections.Generic.List[string]
+    $parsed = 0
+    $hasIndex = [int]::TryParse([string]$Index, [ref]$parsed)
+    if ($null -ne $LetterMap) {
+        if ($hasIndex -and $LetterMap.ContainsKey([string]$parsed)) {
+            $chosen = $LetterMap[[string]$parsed]
+            if ($null -ne $chosen) {
+                foreach ($letter in @($chosen.ToArray())) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$letter)) {
+                        $letters.Add([string]$letter)
+                    }
+                }
+            }
+        } elseif ($letters.Count -eq 0 -and $DiskCount -le 1 -and @($LetterMap.Keys).Count -eq 1) {
+            $onlyKey = [string]@($LetterMap.Keys)[0]
+            $chosen = $LetterMap[$onlyKey]
+            if ($null -ne $chosen) {
+                foreach ($letter in @($chosen.ToArray())) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$letter)) {
+                        $letters.Add([string]$letter)
+                    }
+                }
+            }
+        }
+    }
+    $sum = [uint64]0
+    $saw = $false
+    foreach ($letter in @($letters.ToArray())) {
+        if ($null -eq $VolumeFree -or -not $VolumeFree.ContainsKey([string]$letter)) {
+            continue
+        }
+        $part = [uint64]0
+        if ([uint64]::TryParse([string]$VolumeFree[[string]$letter], [ref]$part)) {
+            $sum += $part
+            $saw = $true
+        }
+    }
+    if (-not $saw -and $DiskCount -le 1 -and $null -ne $VolumeFree) {
+        foreach ($key in @($VolumeFree.Keys)) {
+            $part = [uint64]0
+            if ([uint64]::TryParse([string]$VolumeFree[$key], [ref]$part)) {
+                $sum += $part
+                $saw = $true
+            }
+        }
+    }
+    if (-not $saw) {
+        return $null
+    }
+    return $sum
+}
+
+function ConvertTo-RsDiskHealth {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'n/a'
+    }
+    if ($text -eq '0' -or $text -eq 'Healthy') {
+        return 'Healthy'
+    }
+    if ($text -eq '1' -or $text -eq 'Warning') {
+        return 'Warning'
+    }
+    if ($text -eq '2' -or $text -eq 'Unhealthy') {
+        return 'Unhealthy'
+    }
+    if ($text -eq '5' -or $text -eq 'Unknown') {
+        return 'Unknown'
+    }
+    return $text
+}
+
 function ConvertTo-RsLinkSpeed {
     param($BitsPerSecond)
 
@@ -658,6 +1100,10 @@ function ConvertTo-RsLinkSpeed {
     if ($bits -eq 1000000000) { return '1 Gbps' }
     if ($bits -eq 100000000) { return '100 Mbps' }
     if ($bits -eq 10000000) { return '10 Mbps' }
+    # Win32_NetworkAdapter.Speed is Int64.MaxValue when the NIC has no link.
+    if ($bits -eq 9223372036854775807 -or $bits -gt 1000000000000) {
+        return 'no link'
+    }
     if ($bits -ge 1000000000) {
         $gbps = [math]::Round($bits / 1000000000, 1)
         return ($gbps.ToString([System.Globalization.CultureInfo]::InvariantCulture) + ' Gbps')
@@ -703,6 +1149,45 @@ function Test-RsEthernetAdapter {
     }
     if ($Name -match '(?i)Ethernet' -or $AdapterType -match '(?i)Ethernet') {
         return $true
+    }
+    return $false
+}
+
+function Test-RsWifiAddressInUse {
+    param([string]$Address)
+
+    if ([string]::IsNullOrWhiteSpace($Address) -or $Address -eq 'n/a') {
+        return $false
+    }
+    foreach ($part in $Address.Split(',')) {
+        $token = $part.Trim()
+        if ([string]::IsNullOrWhiteSpace($token)) {
+            continue
+        }
+        if ($token -match '(?i)^fe80:') {
+            continue
+        }
+        if ($token -match '(?i)^169\.254\.') {
+            continue
+        }
+        return $true
+    }
+    return $false
+}
+
+function Test-RsWifiInUse {
+    param($Adapter)
+
+    if ($null -eq $Adapter) {
+        return $false
+    }
+    foreach ($entry in $Adapter) {
+        if ($null -eq $entry) {
+            continue
+        }
+        if (Test-RsWifiAddressInUse -Address ([string](Get-RsProperty -Object $entry -Name 'ip'))) {
+            return $true
+        }
     }
     return $false
 }
@@ -753,6 +1238,41 @@ function Test-RsComDevice {
         return $true
     }
     return [bool]($Name -match '(?i)USB[ -]?Serial|Prolific|FTDI|CH34[01]|Serial Adapter')
+}
+
+function Test-RsBuiltInCom {
+    param([string]$PnpDeviceId)
+
+    $id = [string]$PnpDeviceId
+    if ([string]::IsNullOrWhiteSpace($id)) {
+        return $false
+    }
+    return [bool]($id -match '(?i)(^|\\)(\*|ACPI\\)?PNP050[01]\b')
+}
+
+function Test-RsComNeeded {
+    param(
+        [string]$Name,
+        [string]$PnpDeviceId,
+        [bool]$InUse = $false
+    )
+
+    if ($InUse) {
+        return $true
+    }
+    if (Test-RsBuiltInCom -PnpDeviceId $PnpDeviceId) {
+        return $false
+    }
+    $blob = (([string]$Name) + ' ' + ([string]$PnpDeviceId))
+    if ($blob -match '(?i)USB[\\ -]?Serial|Prolific|FTDI|CH34[01]|Serial Adapter|FTDIBUS') {
+        return $true
+    }
+    # Any serial device whose id is not the motherboard UART (ACPI PNP0500/PNP0501).
+    $id = [string]$PnpDeviceId
+    if (-not [string]::IsNullOrWhiteSpace($id) -and $id -match '(?i)^(USB|PCI|FTDIBUS)\\') {
+        return $true
+    }
+    return $false
 }
 
 function Get-RsPrinterKind {
@@ -1009,7 +1529,7 @@ function Find-RsInstalledApp {
             }
         }
     }
-    Write-Output -NoEnumerate -InputObject $found
+    return ,$found
 }
 
 function Test-RsImagingLabel {
@@ -1028,19 +1548,32 @@ function Get-RsIntelGeneration {
     if ($Name -match '(?i)Core\(TM\)\s+Ultra|Core\s+Ultra') {
         return [pscustomobject]@{ Known = $true; Supported = $true; Detail = 'Intel Core Ultra' }
     }
-    $modelMatch = [regex]::Match([string]$Name, '(?i)Core(?:\(TM\))?\s+i[3579]-(\d{4,5})')
-    if (-not $modelMatch.Success) {
-        return [pscustomobject]@{ Known = $false; Supported = $false; Detail = '' }
-    }
-    $modelText = $modelMatch.Groups[1].Value
-    $model = [int]$modelText
     $generation = 0
-    if ($model -ge 10000) {
-        $generation = [int]$modelText.Substring(0, 2)
-    } elseif ($Name -match '(?i)i[3579]-1\d{3}G\d') {
-        $generation = 10
+    $explicit = [regex]::Match([string]$Name, '(?i)(\d{1,2})(?:st|nd|rd|th)\s+Gen\b')
+    if ($explicit.Success) {
+        $generation = [int]$explicit.Groups[1].Value
     } else {
-        $generation = [int]$modelText.Substring(0, 1)
+        # 5-digit models use the first two digits (10400 is generation 10).
+        # 4-digit models from the 10th generation onward also start with 10-19
+        # (1220P is generation 12). Older 4-digit models use the first digit (8700 is 8).
+        $modelMatch = [regex]::Match([string]$Name, '(?i)i[3579]-(\d{4,5})')
+        if (-not $modelMatch.Success) {
+            return [pscustomobject]@{ Known = $false; Supported = $false; Detail = '' }
+        }
+        $modelText = $modelMatch.Groups[1].Value
+        if ($modelText.Length -ge 5) {
+            $generation = [int]$modelText.Substring(0, 2)
+        } else {
+            $prefix = [int]$modelText.Substring(0, 2)
+            if ($prefix -ge 10 -and $prefix -le 19) {
+                $generation = $prefix
+            } else {
+                $generation = [int]$modelText.Substring(0, 1)
+            }
+        }
+    }
+    if ($generation -le 0) {
+        return [pscustomobject]@{ Known = $false; Supported = $false; Detail = '' }
     }
     return [pscustomobject]@{
         Known     = $true
@@ -1160,10 +1693,10 @@ function Get-RsReplacementNote {
         [bool]$VgaConnected = $false,
         [bool]$ComPort = $false,
         [bool]$Wifi = $false,
+        [bool]$WifiInUse = $false,
         [bool]$DedicatedGpu = $false,
         [bool]$ImagingSoftware = $false,
         [string]$FormFactor = '',
-        [bool]$Bluetooth = $false,
         [bool]$Thunderbolt = $false,
         [int]$BatteryHealth = -1
     )
@@ -1178,14 +1711,20 @@ function Get-RsReplacementNote {
     if ($sawVga) {
         $notes.Add('Needs VGA output')
     }
-    if ($ExternalMonitor -ge 1) {
+    if ($ExternalMonitor -eq 1) {
+        $notes.Add('Uses 1 monitor')
+    } elseif ($ExternalMonitor -ge 2) {
         $notes.Add(('Uses {0} monitors' -f $ExternalMonitor))
     }
     if ($ComPort) {
         $notes.Add('Needs COM port')
     }
     if ($Wifi) {
-        $notes.Add('Needs WiFi')
+        if ($WifiInUse) {
+            $notes.Add('Has WiFi adapter - include WiFi on replacement')
+        } else {
+            $notes.Add('Has WiFi adapter (not in use) - include WiFi on replacement')
+        }
     }
     if ($DedicatedGpu -and $ImagingSoftware) {
         $notes.Add('Dedicated GPU required (CBCT)')
@@ -1200,9 +1739,6 @@ function Get-RsReplacementNote {
         $notes.Add('Laptop')
     } elseif ($FormFactor -eq 'Rack server') {
         $notes.Add('Rack server')
-    }
-    if ($Bluetooth) {
-        $notes.Add('Needs Bluetooth')
     }
     if ($Thunderbolt) {
         $notes.Add('Has USB4 or Thunderbolt')
@@ -1440,18 +1976,26 @@ function Format-RsSummary {
 
     $display = Get-RsProperty -Object $Survey -Name 'display'
     $lines.Add('Display outputs')
-    $lines.Add(('  Reported connections: {0}' -f (Format-RsText -Value (Get-RsProperty -Object $display -Name 'reported'))))
+    $lines.Add(('  Connections in use: {0}' -f (Format-RsText -Value (Get-RsProperty -Object $display -Name 'reported'))))
+    $physicalPort = Format-RsText -Value (Get-RsProperty -Object $display -Name 'physical')
+    if ($physicalPort -ne 'n/a') {
+        $lines.Add(('  Physical ports: {0} (estimated)' -f $physicalPort))
+    }
     $source = Format-RsText -Value (Get-RsProperty -Object $display -Name 'source')
     if ($source -ne 'n/a') {
-        $lines.Add(('  Reported source: {0}' -f $source))
+        $lines.Add(('  Source: {0}' -f $source))
     }
     $gpuSeen = $false
     foreach ($gpu in @(Get-RsProperty -Object $display -Name 'gpu')) {
         $gpuSeen = $true
-        $lines.Add(('  {0} ({1}) VRAM {2} via {3}' -f (Format-RsText -Value $gpu.name), (Format-RsText -Value $gpu.kind), (Format-RsText -Value $gpu.vram), (Format-RsText -Value $gpu.vramSource)))
-        $lines.Add(('    Estimated ports: {0}' -f (Format-RsText -Value $gpu.estimated)))
+        $lines.Add(('  {0}' -f (Format-RsGpuLine -Gpu $gpu)))
+        $gpuKind = Format-RsText -Value $gpu.kind
+        $estimatedPort = Format-RsText -Value $gpu.estimated
+        if ($gpuKind -ne 'integrated' -and $estimatedPort -ne 'n/a') {
+            $lines.Add(('    Estimated ports: {0}' -f $estimatedPort))
+        }
         $estimateNote = Format-RsText -Value $gpu.estimateNote
-        if ($estimateNote -ne 'n/a') {
+        if ($estimateNote -ne 'n/a' -and $gpuKind -ne 'integrated') {
             $lines.Add(('    Estimate note: {0}' -f $estimateNote))
         }
     }
@@ -1629,6 +2173,28 @@ function Format-RsSummary {
     return ($lines -join "`n")
 }
 
+function Get-RsSectionError {
+    param(
+        [string]$Section,
+        $ErrorRecord
+    )
+
+    $line = 0
+    $message = 'n/a'
+    if ($null -ne $ErrorRecord) {
+        if ($null -ne $ErrorRecord.InvocationInfo) {
+            $line = [int]$ErrorRecord.InvocationInfo.ScriptLineNumber
+        }
+        if ($null -ne $ErrorRecord.Exception -and -not [string]::IsNullOrWhiteSpace([string]$ErrorRecord.Exception.Message)) {
+            $message = [string]$ErrorRecord.Exception.Message
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($Section)) {
+        $Section = 'survey'
+    }
+    return ('{0}: line {1}: {2}' -f $Section, $line, $message)
+}
+
 function Get-RsCim {
     param(
         [string]$ClassName,
@@ -1636,7 +2202,13 @@ function Get-RsCim {
     )
 
     try {
-        return @(Get-CimInstance -Namespace $Namespace -ClassName $ClassName -ErrorAction Stop)
+        $items = New-Object System.Collections.Generic.List[object]
+        foreach ($item in @(Get-CimInstance -Namespace $Namespace -ClassName $ClassName -ErrorAction Stop)) {
+            if ($null -ne $item) {
+                $items.Add($item)
+            }
+        }
+        return @($items.ToArray())
     } catch {
         return @()
     }
@@ -1648,21 +2220,24 @@ function Get-RsRegistryValue {
         [string]$Name
     )
 
-    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
-        [Microsoft.Win32.RegistryHive]::LocalMachine,
-        [Microsoft.Win32.RegistryView]::Registry64)
+    $base = $null
+    $key = $null
     try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::LocalMachine,
+            [Microsoft.Win32.RegistryView]::Registry64)
         $key = $base.OpenSubKey($SubKey)
         if ($null -eq $key) {
             return $null
         }
-        try {
-            return $key.GetValue($Name)
-        } finally {
+        return $key.GetValue($Name)
+    } finally {
+        if ($null -ne $key) {
             $key.Close()
         }
-    } finally {
-        $base.Close()
+        if ($null -ne $base) {
+            $base.Close()
+        }
     }
 }
 
@@ -1677,8 +2252,9 @@ function Get-RsUninstallEntry {
     )
     $entries = ConvertTo-RsList
     foreach ($view in $views) {
-        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+        $base = $null
         try {
+            $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
             foreach ($sub in $subkeys) {
                 $key = $base.OpenSubKey($sub)
                 if ($null -eq $key) {
@@ -1700,33 +2276,40 @@ function Get-RsUninstallEntry {
                                 DisplayVersion = [string]$child.GetValue('DisplayVersion')
                             })
                         } finally {
-                            $child.Close()
+                            if ($null -ne $child) {
+                                $child.Close()
+                            }
                         }
                     }
                 } finally {
-                    $key.Close()
+                    if ($null -ne $key) {
+                        $key.Close()
+                    }
                 }
             }
         } finally {
-            $base.Close()
+            if ($null -ne $base) {
+                $base.Close()
+            }
         }
     }
     return @($entries.ToArray())
 }
 
 function Get-RsRegistryGpu {
-    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
-        [Microsoft.Win32.RegistryHive]::LocalMachine,
-        [Microsoft.Win32.RegistryView]::Registry64)
+    $base = $null
     $records = ConvertTo-RsList
     try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::LocalMachine,
+            [Microsoft.Win32.RegistryView]::Registry64)
         $classKey = $base.OpenSubKey('SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}')
         if ($null -eq $classKey) {
-            return $records
+            return @($records.ToArray())
         }
         try {
             foreach ($subName in @($classKey.GetSubKeyNames())) {
-                if ($subName -notmatch '^\d{4}$') {
+                if ([string]::IsNullOrWhiteSpace([string]$subName) -or $subName -notmatch '^\d{4}$') {
                     continue
                 }
                 $sub = $classKey.OpenSubKey($subName)
@@ -1737,60 +2320,82 @@ function Get-RsRegistryGpu {
                     $values = @{}
                     $hints = New-Object System.Collections.Generic.List[string]
                     foreach ($valueName in @($sub.GetValueNames())) {
+                        if ([string]::IsNullOrWhiteSpace([string]$valueName)) {
+                            continue
+                        }
                         $raw = $sub.GetValue($valueName)
                         $values[$valueName] = $raw
                         foreach ($hint in @(Get-RsOutputHint -Text $valueName)) {
-                            if (-not $hints.Contains($hint)) {
+                            if (-not [string]::IsNullOrWhiteSpace([string]$hint) -and -not $hints.Contains($hint)) {
                                 $hints.Add($hint)
                             }
                         }
                         if ($raw -is [string]) {
                             foreach ($hint in @(Get-RsOutputHint -Text $raw)) {
-                                if (-not $hints.Contains($hint)) {
+                                if (-not [string]::IsNullOrWhiteSpace([string]$hint) -and -not $hints.Contains($hint)) {
                                     $hints.Add($hint)
                                 }
                             }
                         }
                     }
                     $vram = Get-RsQwMemorySize -Values $values
+                    $bytes = [uint64]0
+                    $source = $null
+                    if ($null -ne $vram) {
+                        $bytes = [uint64]$vram.Bytes
+                        $source = $vram.Source
+                    }
                     $records.Add([pscustomobject]@{
                         DriverDesc       = [string]$sub.GetValue('DriverDesc')
                         MatchingDeviceId = [string]$sub.GetValue('MatchingDeviceId')
-                        Bytes            = $vram.Bytes
-                        Source           = $vram.Source
-                        Hint             = @($hints)
+                        Bytes            = $bytes
+                        Source           = $source
+                        Hint             = @($hints.ToArray())
                     })
                 } finally {
-                    $sub.Close()
+                    if ($null -ne $sub) {
+                        $sub.Close()
+                    }
                 }
             }
         } finally {
-            $classKey.Close()
+            if ($null -ne $classKey) {
+                $classKey.Close()
+            }
         }
     } finally {
-        $base.Close()
+        if ($null -ne $base) {
+            $base.Close()
+        }
     }
-    return $records
+    return @($records.ToArray())
 }
 
 function Get-RsEdidBlock {
-    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
-        [Microsoft.Win32.RegistryHive]::LocalMachine,
-        [Microsoft.Win32.RegistryView]::Registry64)
+    $base = $null
     $records = ConvertTo-RsList
     try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::LocalMachine,
+            [Microsoft.Win32.RegistryView]::Registry64)
         $display = $base.OpenSubKey('SYSTEM\CurrentControlSet\Enum\DISPLAY')
         if ($null -eq $display) {
-            return $records
+            return @($records.ToArray())
         }
         try {
             foreach ($vendor in @($display.GetSubKeyNames())) {
+                if ([string]::IsNullOrWhiteSpace([string]$vendor)) {
+                    continue
+                }
                 $vendorKey = $display.OpenSubKey($vendor)
                 if ($null -eq $vendorKey) {
                     continue
                 }
                 try {
                     foreach ($instance in @($vendorKey.GetSubKeyNames())) {
+                        if ([string]::IsNullOrWhiteSpace([string]$instance)) {
+                            continue
+                        }
                         $parameter = $vendorKey.OpenSubKey($instance + '\Device Parameters')
                         if ($null -eq $parameter) {
                             continue
@@ -1804,20 +2409,28 @@ function Get-RsEdidBlock {
                                 })
                             }
                         } finally {
-                            $parameter.Close()
+                            if ($null -ne $parameter) {
+                                $parameter.Close()
+                            }
                         }
                     }
                 } finally {
-                    $vendorKey.Close()
+                    if ($null -ne $vendorKey) {
+                        $vendorKey.Close()
+                    }
                 }
             }
         } finally {
-            $display.Close()
+            if ($null -ne $display) {
+                $display.Close()
+            }
         }
     } finally {
-        $base.Close()
+        if ($null -ne $base) {
+            $base.Close()
+        }
     }
-    return $records
+    return @($records.ToArray())
 }
 
 function Get-RsDisplayTechnology {
@@ -1955,205 +2568,337 @@ function Get-RsCollectedSurvey {
     $os = $null
     try {
         $computer = @(Get-RsCim -ClassName 'Win32_ComputerSystem') | Select-Object -First 1
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'identity' -ErrorRecord $_))
+    }
+    try {
         $bios = @(Get-RsCim -ClassName 'Win32_BIOS') | Select-Object -First 1
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'identity' -ErrorRecord $_))
+    }
+    try {
         $enclosure = @(Get-RsCim -ClassName 'Win32_SystemEnclosure') | Select-Object -First 1
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'identity' -ErrorRecord $_))
+    }
+    try {
         $os = @(Get-RsCim -ClassName 'Win32_OperatingSystem') | Select-Object -First 1
     } catch {
-        $problem.Add($_.Exception.Message)
+        $problem.Add((Get-RsSectionError -Section 'identity' -ErrorRecord $_))
     }
     if ($null -eq $computer -and $null -eq $os) {
         return $null
     }
 
-    $manufacturer = Format-RsText -Value (Get-RsProperty -Object $computer -Name 'Manufacturer')
-    $model = Format-RsText -Value (Get-RsProperty -Object $computer -Name 'Model')
-    $serial = Format-RsSerial -Value (Get-RsProperty -Object $bios -Name 'SerialNumber')
-    if ($serial -eq 'n/a') {
-        $serial = Format-RsSerial -Value (Get-RsProperty -Object $enclosure -Name 'SerialNumber')
-    }
-    $sku = Format-RsText -Value (Get-RsProperty -Object $computer -Name 'SystemSKUNumber')
-    $biosVersion = Format-RsText -Value (Get-RsProperty -Object $bios -Name 'SMBIOSBIOSVersion')
-    $biosDate = Format-RsText -Value (ConvertTo-RsBiosDate -Value (Get-RsProperty -Object $bios -Name 'ReleaseDate') -Now $Now)
-    $smbiosMajor = Format-RsText -Value (Get-RsProperty -Object $bios -Name 'SMBIOSMajorVersion')
-    $smbiosMinor = Format-RsText -Value (Get-RsProperty -Object $bios -Name 'SMBIOSMinorVersion')
+    $manufacturer = 'n/a'
+    $model = 'n/a'
+    $serial = 'n/a'
+    $sku = 'n/a'
+    $biosVersion = 'n/a'
+    $biosDate = 'n/a'
     $smbiosVersion = 'n/a'
-    if ($smbiosMajor -ne 'n/a') {
-        $smbiosVersion = $smbiosMajor
-        if ($smbiosMinor -ne 'n/a') {
-            $smbiosVersion = '{0}.{1}' -f $smbiosMajor, $smbiosMinor
+    $shipDate = 'n/a'
+    $form = [pscustomobject]@{ size = 'n/a'; name = 'n/a'; detail = 'n/a' }
+    try {
+        $manufacturer = Format-RsText -Value (Get-RsProperty -Object $computer -Name 'Manufacturer')
+        $model = Format-RsText -Value (Get-RsProperty -Object $computer -Name 'Model')
+        $serial = Format-RsSerial -Value (Get-RsProperty -Object $bios -Name 'SerialNumber')
+        if ($serial -eq 'n/a') {
+            $serial = Format-RsSerial -Value (Get-RsProperty -Object $enclosure -Name 'SerialNumber')
         }
+        $sku = Format-RsText -Value (Get-RsProperty -Object $computer -Name 'SystemSKUNumber')
+        $biosVersion = Format-RsText -Value (Get-RsProperty -Object $bios -Name 'SMBIOSBIOSVersion')
+        $biosDate = Format-RsText -Value (ConvertTo-RsBiosDate -Value (Get-RsProperty -Object $bios -Name 'ReleaseDate') -Now $Now)
+        $smbiosMajor = Format-RsText -Value (Get-RsProperty -Object $bios -Name 'SMBIOSMajorVersion')
+        $smbiosMinor = Format-RsText -Value (Get-RsProperty -Object $bios -Name 'SMBIOSMinorVersion')
+        $smbiosVersion = 'n/a'
+        if ($smbiosMajor -ne 'n/a') {
+            $smbiosVersion = $smbiosMajor
+            if ($smbiosMinor -ne 'n/a') {
+                $smbiosVersion = '{0}.{1}' -f $smbiosMajor, $smbiosMinor
+            }
+        }
+        $shipDate = Get-RsShipDateEstimate -Manufacturer $manufacturer -Serial $serial -BiosReleaseDate (Get-RsProperty -Object $bios -Name 'ReleaseDate') -Now $Now
+        $form = Get-RsFormFactor -ChassisType (Get-RsProperty -Object $enclosure -Name 'ChassisTypes') -Model $model -PcSystemType (Get-RsProperty -Object $computer -Name 'PCSystemType') -WidthInch (Get-RsProperty -Object $enclosure -Name 'Width') -HeightInch (Get-RsProperty -Object $enclosure -Name 'Height') -DepthInch (Get-RsProperty -Object $enclosure -Name 'Depth')
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'identity' -ErrorRecord $_))
+        $manufacturer = 'n/a'
+        $model = 'n/a'
+        $serial = 'n/a'
+        $sku = 'n/a'
+        $biosVersion = 'n/a'
+        $biosDate = 'n/a'
+        $smbiosVersion = 'n/a'
+        $shipDate = 'n/a'
+        $form = [pscustomobject]@{ size = 'n/a'; name = 'n/a'; detail = 'n/a' }
     }
-    $shipDate = Get-RsShipDateEstimate -Manufacturer $manufacturer -Serial $serial -BiosReleaseDate (Get-RsProperty -Object $bios -Name 'ReleaseDate') -Now $Now
-    $form = Get-RsFormFactor -ChassisType (Get-RsProperty -Object $enclosure -Name 'ChassisTypes') -Model $model -PcSystemType (Get-RsProperty -Object $computer -Name 'PCSystemType')
 
-    $registryGpu = @(Get-RsRegistryGpu)
+    $registryGpu = @()
+    $registryHints = New-Object System.Collections.Generic.List[string]
+    try {
+        $registryGpu = @(Get-RsRegistryGpu)
+        foreach ($hintGroup in $registryGpu) {
+            if ($null -eq $hintGroup) {
+                continue
+            }
+            foreach ($hint in @($hintGroup.Hint)) {
+                $hintText = [string]$hint
+                if (-not [string]::IsNullOrWhiteSpace($hintText) -and -not $registryHints.Contains($hintText)) {
+                    $registryHints.Add($hintText)
+                }
+            }
+        }
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'gpu' -ErrorRecord $_))
+        $registryGpu = @()
+        $registryHints = New-Object System.Collections.Generic.List[string]
+    }
     $gpuItems = ConvertTo-RsList
     $dedicated = $false
-    $registryHints = New-Object System.Collections.Generic.List[string]
-    foreach ($hintGroup in $registryGpu) {
-        foreach ($hint in @($hintGroup.Hint)) {
-            if (-not $registryHints.Contains([string]$hint)) {
-                $registryHints.Add([string]$hint)
+    try {
+        foreach ($controller in @(Get-RsCim -ClassName 'Win32_VideoController')) {
+            if ($null -eq $controller) {
+                continue
             }
-        }
-    }
-    foreach ($controller in @(Get-RsCim -ClassName 'Win32_VideoController')) {
-        $name = Format-RsText -Value (Get-RsProperty -Object $controller -Name 'Name')
-        $pnp = [string](Get-RsProperty -Object $controller -Name 'PNPDeviceID')
-        $isDedicated = Test-RsDedicatedGpu -Name $name -PnpDeviceId $pnp
-        if ($isDedicated) {
-            $dedicated = $true
-        }
-        $kind = 'integrated'
-        if ($isDedicated) {
-            $kind = 'dedicated'
-        }
-        $bytes = [uint64]0
-        $vramSource = 'n/a'
-        foreach ($entry in $registryGpu) {
-            $id = [string]$entry.MatchingDeviceId
-            $desc = [string]$entry.DriverDesc
-            $idMatch = -not [string]::IsNullOrWhiteSpace($id) -and $pnp.StartsWith($id, [System.StringComparison]::OrdinalIgnoreCase)
-            $nameMatch = $name -ne 'n/a' -and $name -eq $desc
-            if ($idMatch -or $nameMatch) {
-                $bytes = [uint64]$entry.Bytes
-                if (-not [string]::IsNullOrWhiteSpace([string]$entry.Source)) {
-                    $vramSource = [string]$entry.Source
+            $name = Format-RsText -Value (Get-RsProperty -Object $controller -Name 'Name')
+            $pnp = [string](Get-RsProperty -Object $controller -Name 'PNPDeviceID')
+            if ([string]::IsNullOrWhiteSpace($pnp)) {
+                $pnp = ''
+            }
+            $isDedicated = Test-RsDedicatedGpu -Name $name -PnpDeviceId $pnp
+            if ($isDedicated) {
+                $dedicated = $true
+            }
+            $kind = 'integrated'
+            if ($isDedicated) {
+                $kind = 'dedicated'
+            }
+            $bytes = [uint64]0
+            $vramSource = 'n/a'
+            foreach ($entry in $registryGpu) {
+                if ($null -eq $entry) {
+                    continue
                 }
-                break
+                $id = [string]$entry.MatchingDeviceId
+                $desc = [string]$entry.DriverDesc
+                $idMatch = $false
+                if (-not [string]::IsNullOrWhiteSpace($id) -and -not [string]::IsNullOrWhiteSpace($pnp)) {
+                    $idMatch = $pnp.StartsWith($id, [System.StringComparison]::OrdinalIgnoreCase)
+                }
+                $nameMatch = $name -ne 'n/a' -and $name -eq $desc
+                if ($idMatch -or $nameMatch) {
+                    if ($null -ne $entry.Bytes) {
+                        $bytes = [uint64]$entry.Bytes
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace([string]$entry.Source)) {
+                        $vramSource = [string]$entry.Source
+                    }
+                    break
+                }
             }
+            $vramText = 'n/a'
+            if ($kind -eq 'integrated') {
+                $vramText = 'Shared memory (integrated)'
+            } elseif ($bytes -gt 0) {
+                $vramGb = [math]::Round(($bytes / 1073741824), 1)
+                $vramText = $vramGb.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+            }
+            $estimate = Get-RsGpuOutputEstimate -Name $name
+            $estimated = 'n/a'
+            $estimateNote = 'n/a'
+            if ($null -ne $estimate -and $estimate.Estimated) {
+                $estimated = Format-RsEstimatedPort -Estimate $estimate
+                $estimateNote = [string]$estimate.Note
+            }
+            $gpuItems.Add([pscustomobject]@{
+                name         = $name
+                kind         = $kind
+                vram         = $vramText
+                vramSource   = $vramSource
+                estimated    = $estimated
+                estimateNote = $estimateNote
+            })
         }
-        $vramText = 'n/a'
-        if ($bytes -gt 0) {
-            $vramGb = [math]::Round(($bytes / 1073741824), 1)
-            $vramText = $vramGb.ToString([System.Globalization.CultureInfo]::InvariantCulture)
-        }
-        $estimate = Get-RsGpuOutputEstimate -Name $name
-        $gpuItems.Add([pscustomobject]@{
-            name         = $name
-            kind         = $kind
-            vram         = $vramText
-            vramSource   = $vramSource
-            estimated    = (Format-RsEstimatedPort -Estimate $estimate)
-            estimateNote = $(if ($estimate.Estimated) { [string]$estimate.Note } else { 'n/a' })
-        })
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'gpu' -ErrorRecord $_))
+        $gpuItems = ConvertTo-RsList
+        $dedicated = $false
     }
 
     $connectionByKey = @{}
-    foreach ($connection in @(Get-RsCim -ClassName 'WmiMonitorConnectionParams' -Namespace 'root\wmi')) {
-        $key = Get-RsMonitorKey -InstanceName (Get-RsProperty -Object $connection -Name 'InstanceName')
-        $connectionByKey[$key] = ConvertTo-RsVideoOutput -Value (Get-RsProperty -Object $connection -Name 'VideoOutputTechnology')
-    }
     $sizeByKey = @{}
-    foreach ($basic in @(Get-RsCim -ClassName 'WmiMonitorBasicDisplayParams' -Namespace 'root\wmi')) {
-        $key = Get-RsMonitorKey -InstanceName (Get-RsProperty -Object $basic -Name 'InstanceName')
-        $inch = Get-RsPanelInch -WidthCm (Get-RsProperty -Object $basic -Name 'MaxHorizontalImageSize') -HeightCm (Get-RsProperty -Object $basic -Name 'MaxVerticalImageSize')
-        if ($null -ne $inch) {
-            $sizeByKey[$key] = $inch.ToString([System.Globalization.CultureInfo]::InvariantCulture)
-        }
-    }
     $edidByKey = @{}
-    foreach ($edid in @(Get-RsEdidBlock)) {
-        $edidByKey[[string]$edid.Key] = $edid.Block
-    }
-
     $reportedNames = New-Object System.Collections.Generic.List[string]
-    foreach ($key in @($connectionByKey.Keys)) {
-        $reportedNames.Add([string]$connectionByKey[$key])
-    }
     $reportedSource = 'n/a'
-    if ($reportedNames.Count -gt 0) {
-        $reportedSource = 'WmiMonitorConnectionParams'
-    } else {
-        foreach ($name in @(Get-RsDisplayTechnology)) {
-            $reportedNames.Add([string]$name)
-        }
-        if ($reportedNames.Count -gt 0) {
-            $reportedSource = 'display config'
-        }
-    }
-    if ($registryHints.Count -gt 0 -and $reportedNames.Count -eq 0) {
-        foreach ($hint in $registryHints) {
-            $reportedNames.Add($hint)
-        }
-        $reportedSource = 'display class registry'
-    }
-
     $monitorItems = ConvertTo-RsList
     $external = 0
-    foreach ($screen in @(Get-RsCim -ClassName 'WmiMonitorID' -Namespace 'root\wmi')) {
-        $active = Get-RsProperty -Object $screen -Name 'Active'
-        if ($active -eq $false) {
-            continue
+    try {
+        foreach ($connection in @(Get-RsCim -ClassName 'WmiMonitorConnectionParams' -Namespace 'root\wmi')) {
+            if ($null -eq $connection) {
+                continue
+            }
+            $key = Get-RsMonitorKey -InstanceName (Get-RsProperty -Object $connection -Name 'InstanceName')
+            $connectionByKey[$key] = ConvertTo-RsVideoOutput -Value (Get-RsProperty -Object $connection -Name 'VideoOutputTechnology')
         }
-        $key = Get-RsMonitorKey -InstanceName (Get-RsProperty -Object $screen -Name 'InstanceName')
-        $make = ConvertTo-RsMonitorVendor -Code (ConvertTo-RsAsciiWord -Value (Get-RsProperty -Object $screen -Name 'ManufacturerName'))
-        $friendly = ConvertTo-RsAsciiWord -Value (Get-RsProperty -Object $screen -Name 'UserFriendlyName')
-        if ([string]::IsNullOrWhiteSpace($friendly)) {
-            $friendly = ConvertTo-RsAsciiWord -Value (Get-RsProperty -Object $screen -Name 'ProductCodeID')
-        }
-        $screenSerial = ConvertTo-RsAsciiWord -Value (Get-RsProperty -Object $screen -Name 'SerialNumberID')
-        $connection = 'n/a'
-        if ($connectionByKey.ContainsKey($key)) {
-            $connection = [string]$connectionByKey[$key]
-        }
-        $sizeText = 'n/a'
-        if ($sizeByKey.ContainsKey($key)) {
-            $sizeText = [string]$sizeByKey[$key]
-        }
-        $resolution = 'n/a'
-        if ($edidByKey.ContainsKey($key)) {
-            $decoded = Get-RsEdidResolution -Block $edidByKey[$key]
-            if (-not [string]::IsNullOrWhiteSpace($decoded)) {
-                $resolution = $decoded
+        foreach ($basic in @(Get-RsCim -ClassName 'WmiMonitorBasicDisplayParams' -Namespace 'root\wmi')) {
+            if ($null -eq $basic) {
+                continue
+            }
+            $key = Get-RsMonitorKey -InstanceName (Get-RsProperty -Object $basic -Name 'InstanceName')
+            $inch = Get-RsPanelInch -WidthCm (Get-RsProperty -Object $basic -Name 'MaxHorizontalImageSize') -HeightCm (Get-RsProperty -Object $basic -Name 'MaxVerticalImageSize')
+            if ($null -ne $inch) {
+                $sizeByKey[$key] = $inch.ToString([System.Globalization.CultureInfo]::InvariantCulture)
             }
         }
-        $year = 0
-        if ([int]::TryParse([string](Get-RsProperty -Object $screen -Name 'YearOfManufacture'), [ref]$year) -and $year -ge 1995) {
-            if ($friendly.Length -gt 0) {
-                $friendly = '{0} (made {1})' -f $friendly, $year
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'monitors' -ErrorRecord $_))
+        $connectionByKey = @{}
+        $sizeByKey = @{}
+    }
+    try {
+        foreach ($edid in @(Get-RsEdidBlock)) {
+            if ($null -eq $edid) {
+                continue
+            }
+            $edidByKey[[string]$edid.Key] = $edid.Block
+        }
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'monitors' -ErrorRecord $_))
+        $edidByKey = @{}
+    }
+    try {
+        foreach ($key in @($connectionByKey.Keys)) {
+            $reportedNames.Add([string]$connectionByKey[$key])
+        }
+        if ($reportedNames.Count -gt 0) {
+            $reportedSource = 'WmiMonitorConnectionParams'
+        } else {
+            foreach ($name in @(Get-RsDisplayTechnology)) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$name)) {
+                    $reportedNames.Add([string]$name)
+                }
+            }
+            if ($reportedNames.Count -gt 0) {
+                $reportedSource = 'display config'
             }
         }
-        if ($connection -ne 'Internal' -and $connection -ne 'LVDS') {
-            $external++
+        if ($registryHints.Count -gt 0 -and $reportedNames.Count -eq 0) {
+            foreach ($hint in $registryHints) {
+                $reportedNames.Add($hint)
+            }
+            $reportedSource = 'display class registry'
         }
-        $monitorItems.Add([pscustomobject]@{
-            make       = (Format-RsText -Value $make)
-            model      = (Format-RsText -Value $friendly)
-            serial     = (Format-RsText -Value $screenSerial)
-            sizeInch   = $sizeText
-            connection = (Format-RsText -Value $connection)
-            resolution = $resolution
-        })
+        foreach ($screen in @(Get-RsCim -ClassName 'WmiMonitorID' -Namespace 'root\wmi')) {
+            if ($null -eq $screen) {
+                continue
+            }
+            $active = Get-RsProperty -Object $screen -Name 'Active'
+            if ($active -eq $false) {
+                continue
+            }
+            $key = Get-RsMonitorKey -InstanceName (Get-RsProperty -Object $screen -Name 'InstanceName')
+            $make = ConvertTo-RsMonitorVendor -Code (ConvertTo-RsAsciiWord -Value (Get-RsProperty -Object $screen -Name 'ManufacturerName'))
+            $productCode = [string](ConvertTo-RsAsciiWord -Value (Get-RsProperty -Object $screen -Name 'ProductCodeID'))
+            $friendly = [string](ConvertTo-RsAsciiWord -Value (Get-RsProperty -Object $screen -Name 'UserFriendlyName'))
+            if ([string]::IsNullOrWhiteSpace($friendly)) {
+                $friendly = $productCode
+            }
+            $screenSerial = ConvertTo-RsAsciiWord -Value (Get-RsProperty -Object $screen -Name 'SerialNumberID')
+            $connection = 'n/a'
+            if ($connectionByKey.ContainsKey($key)) {
+                $connection = [string]$connectionByKey[$key]
+            }
+            $sizeText = 'n/a'
+            if ($sizeByKey.ContainsKey($key)) {
+                $sizeText = [string]$sizeByKey[$key]
+            }
+            $resolution = 'n/a'
+            if ($edidByKey.ContainsKey($key)) {
+                $decoded = Get-RsEdidResolution -Block $edidByKey[$key]
+                if (-not [string]::IsNullOrWhiteSpace($decoded)) {
+                    $resolution = $decoded
+                }
+            }
+            $year = 0
+            if ([int]::TryParse([string](Get-RsProperty -Object $screen -Name 'YearOfManufacture'), [ref]$year) -and $year -ge 1995) {
+                if (-not [string]::IsNullOrEmpty($friendly)) {
+                    $friendly = '{0} (made {1})' -f $friendly, $year
+                }
+            }
+            $monitorItems.Add([pscustomobject]@{
+                make       = (Format-RsText -Value $make)
+                model      = (Format-RsText -Value $friendly)
+                product    = (Format-RsText -Value $productCode)
+                serial     = (Format-RsText -Value $screenSerial)
+                sizeInch   = $sizeText
+                connection = (Format-RsText -Value $connection)
+                resolution = $resolution
+                outputKey  = $key
+            })
+        }
+        $monitorItems = Select-RsUniqueMonitor -Monitor @($monitorItems.ToArray())
+        $external = Get-RsExternalMonitorCount -Monitor @($monitorItems.ToArray())
+        $activeConnection = Get-RsActiveConnection -Monitor @($monitorItems.ToArray())
+        if ($activeConnection.Count -gt 0) {
+            $reportedNames = $activeConnection
+        }
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'monitors' -ErrorRecord $_))
+        $reportedNames = New-Object System.Collections.Generic.List[string]
+        $reportedSource = 'n/a'
+        $monitorItems = ConvertTo-RsList
+        $external = 0
     }
 
-    $processors = @(Get-RsCim -ClassName 'Win32_Processor')
     $cpuItems = ConvertTo-RsList
-    foreach ($processor in $processors) {
-        $cpuName = Format-RsText -Value (Get-RsProperty -Object $processor -Name 'Name')
-        $core = 0
-        $logical = 0
-        $mhz = 0
-        $width = 0
-        [void][int]::TryParse([string](Get-RsProperty -Object $processor -Name 'NumberOfCores'), [ref]$core)
-        [void][int]::TryParse([string](Get-RsProperty -Object $processor -Name 'NumberOfLogicalProcessors'), [ref]$logical)
-        [void][int]::TryParse([string](Get-RsProperty -Object $processor -Name 'MaxClockSpeed'), [ref]$mhz)
-        [void][int]::TryParse([string](Get-RsProperty -Object $processor -Name 'AddressWidth'), [ref]$width)
-        $support = Test-RsCpuSupport -Name $cpuName -Core $core -AddressWidth $width -MaxClockMHz $mhz
-        $cpuItems.Add([pscustomobject]@{
-            name       = $cpuName
-            core       = $(if ($core -gt 0) { [string]$core } else { 'n/a' })
-            logical    = $(if ($logical -gt 0) { [string]$logical } else { 'n/a' })
-            mhz        = $(if ($mhz -gt 0) { [string]$mhz } else { 'n/a' })
-            readiness  = ('{0}: {1}' -f $support.Status, $support.Detail)
-        })
+    try {
+        foreach ($processor in @(Get-RsCim -ClassName 'Win32_Processor')) {
+            if ($null -eq $processor) {
+                continue
+            }
+            $cpuName = Format-RsText -Value (Get-RsProperty -Object $processor -Name 'Name')
+            $core = 0
+            $logical = 0
+            $mhz = 0
+            $width = 0
+            [void][int]::TryParse([string](Get-RsProperty -Object $processor -Name 'NumberOfCores'), [ref]$core)
+            [void][int]::TryParse([string](Get-RsProperty -Object $processor -Name 'NumberOfLogicalProcessors'), [ref]$logical)
+            [void][int]::TryParse([string](Get-RsProperty -Object $processor -Name 'MaxClockSpeed'), [ref]$mhz)
+            [void][int]::TryParse([string](Get-RsProperty -Object $processor -Name 'AddressWidth'), [ref]$width)
+            $support = Test-RsCpuSupport -Name $cpuName -Core $core -AddressWidth $width -MaxClockMHz $mhz
+            $status = 'n/a'
+            $detail = 'n/a'
+            if ($null -ne $support) {
+                $status = [string]$support.Status
+                $detail = [string]$support.Detail
+            }
+            $cpuItems.Add([pscustomobject]@{
+                name       = $cpuName
+                core       = $(if ($core -gt 0) { [string]$core } else { 'n/a' })
+                logical    = $(if ($logical -gt 0) { [string]$logical } else { 'n/a' })
+                mhz        = $(if ($mhz -gt 0) { [string]$mhz } else { 'n/a' })
+                readiness  = ('{0}: {1}' -f $status, $detail)
+            })
+        }
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'cpu' -ErrorRecord $_))
+        $cpuItems = ConvertTo-RsList
     }
 
+    $dimmItems = ConvertTo-RsList
+    $slotText = 'n/a'
+    $maxText = 'n/a'
+    try {
     $modules = @(Get-RsCim -ClassName 'Win32_PhysicalMemory')
     $arrays = @(Get-RsCim -ClassName 'Win32_PhysicalMemoryArray')
     $slotTotal = 0
-    $maxKb = 0.0
+    $maxGb = 0.0
+    $installedBytes = [uint64]0
+    $solderedCount = 0
     foreach ($array in $arrays) {
+        if ($null -eq $array) {
+            continue
+        }
         $count = 0
         if ([int]::TryParse([string](Get-RsProperty -Object $array -Name 'MemoryDevices'), [ref]$count)) {
             $slotTotal += $count
@@ -2162,12 +2907,21 @@ function Get-RsCollectedSurvey {
         if ($null -eq $capacity) {
             $capacity = ConvertTo-RsMaxRamGb -Kilobyte (Get-RsProperty -Object $array -Name 'MaxCapacity')
         }
-        if ($null -ne $capacity -and $capacity -gt $maxKb) {
-            $maxKb = $capacity
+        if ($null -ne $capacity -and $capacity -gt $maxGb) {
+            $maxGb = $capacity
         }
     }
-    $dimmItems = ConvertTo-RsList
     foreach ($module in $modules) {
+        if ($null -eq $module) {
+            continue
+        }
+        $moduleBytes = [uint64]0
+        if ([uint64]::TryParse([string](Get-RsProperty -Object $module -Name 'Capacity'), [ref]$moduleBytes)) {
+            $installedBytes += $moduleBytes
+        }
+        if (Test-RsSolderedMemory -FormFactor (Get-RsProperty -Object $module -Name 'FormFactor') -MemoryType (Get-RsProperty -Object $module -Name 'SMBIOSMemoryType')) {
+            $solderedCount++
+        }
         $locator = Format-RsText -Value (Get-RsProperty -Object $module -Name 'DeviceLocator')
         if ($locator -eq 'n/a') {
             $locator = Format-RsText -Value (Get-RsProperty -Object $module -Name 'BankLabel')
@@ -2183,38 +2937,41 @@ function Get-RsCollectedSurvey {
             speed   = $(if ($null -eq $speed -or [string]$speed -eq '0') { 'n/a' } else { [string]$speed })
         })
     }
-    $slotText = 'n/a'
-    if ($slotTotal -gt 0) {
-        $slotText = '{0} of {1}' -f $dimmItems.Count, $slotTotal
-    } elseif ($dimmItems.Count -gt 0) {
-        $slotText = '{0} populated, total n/a' -f $dimmItems.Count
+    $allSoldered = ($dimmItems.Count -gt 0 -and $solderedCount -ge $dimmItems.Count)
+    $slotText = Get-RsMemorySlotSummary -Populated $dimmItems.Count -Soldered $solderedCount -SlotTotal $slotTotal
+    $installedGb = $null
+    if ($installedBytes -gt 0) {
+        $installedGb = [math]::Round($installedBytes / 1073741824, 1)
     }
-    $maxText = 'n/a'
-    if ($maxKb -gt 0) {
-        $maxText = $maxKb.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    $maxArg = $null
+    if ($maxGb -gt 0) {
+        $maxArg = $maxGb
+    }
+    $maxText = Get-RsMemoryMaxText -MaxGb $maxArg -InstalledGb $installedGb -Soldered $allSoldered
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'memory' -ErrorRecord $_))
+        $dimmItems = ConvertTo-RsList
+        $slotText = 'n/a'
+        $maxText = 'n/a'
     }
 
-    $freeByDisk = @{}
-    foreach ($link in @(Get-RsCim -ClassName 'Win32_LogicalDiskToPartition')) {
-        $partitionText = [string](Get-RsProperty -Object $link -Name 'Antecedent')
-        $logicalText = [string](Get-RsProperty -Object $link -Name 'Dependent')
-        $diskIndex = Get-RsDiskIndex -Text $partitionText
-        $letterMatch = [regex]::Match($logicalText, 'DeviceID="([A-Z]:)"')
-        if ($null -eq $diskIndex -or -not $letterMatch.Success) {
+    $diskItems = ConvertTo-RsList
+    $volumeItems = ConvertTo-RsList
+    try {
+    $freeByDisk = Get-RsDiskLetterMap -Link @(Get-RsCim -ClassName 'Win32_LogicalDiskToPartition')
+    $volumeFree = @{}
+    foreach ($logical in @(Get-RsCim -ClassName 'Win32_LogicalDisk')) {
+        if ($null -eq $logical) {
             continue
         }
-        if (-not $freeByDisk.ContainsKey([int]$diskIndex)) {
-            $freeByDisk[[int]$diskIndex] = New-Object System.Collections.Generic.List[string]
-        }
-        $freeByDisk[[int]$diskIndex].Add($letterMatch.Groups[1].Value)
-    }
-    $volumeFree = @{}
-    $volumeItems = ConvertTo-RsList
-    foreach ($logical in @(Get-RsCim -ClassName 'Win32_LogicalDisk')) {
         if ([string](Get-RsProperty -Object $logical -Name 'DriveType') -ne '3') {
             continue
         }
         $letter = Format-RsText -Value (Get-RsProperty -Object $logical -Name 'DeviceID')
+        $letterFound = [regex]::Match($letter, '^[A-Za-z]:$')
+        if ($letterFound.Success) {
+            $letter = $letter.ToUpperInvariant()
+        }
         $free = Get-RsProperty -Object $logical -Name 'FreeSpace'
         $size = Get-RsProperty -Object $logical -Name 'Size'
         $volumeFree[$letter] = $free
@@ -2225,13 +2982,15 @@ function Get-RsCollectedSurvey {
         })
     }
 
-    $diskItems = ConvertTo-RsList
     $physical = @(Get-RsCim -ClassName 'MSFT_PhysicalDisk' -Namespace 'root\microsoft\windows\storage')
     if ($physical.Count -eq 0) {
         $physical = @(Get-RsCim -ClassName 'Win32_DiskDrive')
     }
     $diskPosition = 0
     foreach ($disk in $physical) {
+        if ($null -eq $disk) {
+            continue
+        }
         $diskModel = Format-RsText -Value (Get-RsProperty -Object $disk -Name 'FriendlyName')
         if ($diskModel -eq 'n/a') {
             $diskModel = Format-RsText -Value (Get-RsProperty -Object $disk -Name 'Model')
@@ -2245,26 +3004,14 @@ function Get-RsCollectedSurvey {
         if ([int]::TryParse([string]$indexValue, [ref]$parsedIndex)) {
             $indexNumber = $parsedIndex
         }
-        $freeBytes = $null
-        if ($null -ne $indexNumber -and $freeByDisk.ContainsKey([int]$indexNumber)) {
-            $sum = [uint64]0
-            $saw = $false
-            foreach ($letter in @($freeByDisk[[int]$indexNumber])) {
-                if ($volumeFree.ContainsKey([string]$letter)) {
-                    $part = [uint64]0
-                    if ([uint64]::TryParse([string]$volumeFree[[string]$letter], [ref]$part)) {
-                        $sum += $part
-                        $saw = $true
-                    }
-                }
-            }
-            if ($saw) {
-                $freeBytes = $sum
-            }
+        $freeLookup = $indexValue
+        if ($null -ne $indexNumber) {
+            $freeLookup = $indexNumber
         }
-        $health = Format-RsText -Value (Get-RsProperty -Object $disk -Name 'HealthStatus')
+        $freeBytes = Get-RsDiskFreeSpace -Index $freeLookup -LetterMap $freeByDisk -VolumeFree $volumeFree -DiskCount $physical.Count
+        $health = ConvertTo-RsDiskHealth -Value (Get-RsProperty -Object $disk -Name 'HealthStatus')
         if ($health -eq 'n/a') {
-            $health = Format-RsText -Value (Get-RsProperty -Object $disk -Name 'Status')
+            $health = ConvertTo-RsDiskHealth -Value (Get-RsProperty -Object $disk -Name 'Status')
         }
         $diskItems.Add([pscustomobject]@{
             index  = $(if ($null -eq $indexNumber) { [string]$diskPosition } else { [string]$indexNumber })
@@ -2277,79 +3024,115 @@ function Get-RsCollectedSurvey {
         })
         $diskPosition++
     }
-
-    $configByMac = @{}
-    foreach ($config in @(Get-RsCim -ClassName 'Win32_NetworkAdapterConfiguration')) {
-        $mac = [string](Get-RsProperty -Object $config -Name 'MACAddress')
-        if ([string]::IsNullOrWhiteSpace($mac)) {
-            continue
-        }
-        $ips = @()
-        foreach ($ip in @(Get-RsProperty -Object $config -Name 'IPAddress')) {
-            if (-not [string]::IsNullOrWhiteSpace([string]$ip)) {
-                $ips += [string]$ip
-            }
-        }
-        $configByMac[$mac.ToUpperInvariant()] = $(if ($ips.Count -eq 0) { 'n/a' } else { $ips -join ', ' })
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'storage' -ErrorRecord $_))
+        $diskItems = ConvertTo-RsList
+        $volumeItems = ConvertTo-RsList
     }
+
     $ethernetItems = ConvertTo-RsList
     $wifiItems = ConvertTo-RsList
-    foreach ($adapter in @(Get-RsCim -ClassName 'Win32_NetworkAdapter')) {
-        $adapterName = [string](Get-RsProperty -Object $adapter -Name 'Name')
-        $mac = Format-RsText -Value (Get-RsProperty -Object $adapter -Name 'MACAddress')
-        $ip = 'n/a'
-        if ($mac -ne 'n/a' -and $configByMac.ContainsKey($mac.ToUpperInvariant())) {
-            $ip = [string]$configByMac[$mac.ToUpperInvariant()]
+    try {
+        $configByMac = @{}
+        foreach ($config in @(Get-RsCim -ClassName 'Win32_NetworkAdapterConfiguration')) {
+            if ($null -eq $config) {
+                continue
+            }
+            $mac = [string](Get-RsProperty -Object $config -Name 'MACAddress')
+            if ([string]::IsNullOrWhiteSpace($mac)) {
+                continue
+            }
+            $macKey = $mac.ToUpperInvariant()
+            $ips = @()
+            foreach ($ip in @(Get-RsProperty -Object $config -Name 'IPAddress')) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$ip)) {
+                    $ips += [string]$ip
+                }
+            }
+            $configByMac[$macKey] = $(if ($ips.Count -eq 0) { 'n/a' } else { $ips -join ', ' })
         }
-        $speed = ConvertTo-RsLinkSpeed -BitsPerSecond (Get-RsProperty -Object $adapter -Name 'Speed')
-        if (Test-RsEthernetAdapter -Name $adapterName -AdapterType ([string](Get-RsProperty -Object $adapter -Name 'AdapterType'))) {
-            $ethernetItems.Add([pscustomobject]@{
-                name  = (Format-RsText -Value $adapterName)
-                speed = $speed
-                mac   = $mac
-                ip    = $ip
-            })
-        } elseif (Test-RsWifiAdapter -Name $adapterName) {
-            $wifiItems.Add([pscustomobject]@{
-                name     = (Format-RsText -Value $adapterName)
-                standard = (ConvertTo-RsWifiStandard -Name $adapterName)
-                mac      = $mac
-                ip       = $ip
-            })
+        foreach ($adapter in @(Get-RsCim -ClassName 'Win32_NetworkAdapter')) {
+            if ($null -eq $adapter) {
+                continue
+            }
+            $adapterName = [string](Get-RsProperty -Object $adapter -Name 'Name')
+            $mac = Format-RsText -Value (Get-RsProperty -Object $adapter -Name 'MACAddress')
+            $ip = 'n/a'
+            if ($mac -ne 'n/a') {
+                $macKey = $mac.ToUpperInvariant()
+                if ($configByMac.ContainsKey($macKey)) {
+                    $ip = [string]$configByMac[$macKey]
+                }
+            }
+            $speed = ConvertTo-RsLinkSpeed -BitsPerSecond (Get-RsProperty -Object $adapter -Name 'Speed')
+            if (Test-RsEthernetAdapter -Name $adapterName -AdapterType ([string](Get-RsProperty -Object $adapter -Name 'AdapterType'))) {
+                $ethernetItems.Add([pscustomobject]@{
+                    name  = (Format-RsText -Value $adapterName)
+                    speed = $speed
+                    mac   = $mac
+                    ip    = $ip
+                })
+            } elseif (Test-RsWifiAdapter -Name $adapterName) {
+                $wifiItems.Add([pscustomobject]@{
+                    name     = (Format-RsText -Value $adapterName)
+                    standard = (ConvertTo-RsWifiStandard -Name $adapterName)
+                    mac      = $mac
+                    ip       = $ip
+                })
+            }
         }
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'network' -ErrorRecord $_))
+        $ethernetItems = ConvertTo-RsList
+        $wifiItems = ConvertTo-RsList
     }
 
-    $bluetoothText = 'none'
-    $bluetoothOn = $false
-    foreach ($device in @(Get-RsCim -ClassName 'Win32_PnPEntity')) {
-        $deviceName = [string](Get-RsProperty -Object $device -Name 'Name')
-        $deviceClass = [string](Get-RsProperty -Object $device -Name 'PNPClass')
-        if ($deviceClass -ne 'Bluetooth' -and $deviceName -notmatch '(?i)Bluetooth') {
-            continue
+    $bluetoothText = 'n/a'
+    try {
+        $bluetoothText = 'none'
+        foreach ($device in @(Get-RsCim -ClassName 'Win32_PnPEntity')) {
+            if ($null -eq $device) {
+                continue
+            }
+            $deviceName = [string](Get-RsProperty -Object $device -Name 'Name')
+            $deviceClass = [string](Get-RsProperty -Object $device -Name 'PNPClass')
+            if ($deviceClass -ne 'Bluetooth' -and $deviceName -notmatch '(?i)Bluetooth') {
+                continue
+            }
+            if ($deviceName -match '(?i)Enumerator|RFCOMM|Personal Area|Service|Profile|Device \(') {
+                continue
+            }
+            $errorCode = 0
+            [void][int]::TryParse([string](Get-RsProperty -Object $device -Name 'ConfigManagerErrorCode'), [ref]$errorCode)
+            $state = 'radio state n/a'
+            if ($errorCode -eq 22) {
+                $state = 'radio off'
+            } elseif ([string](Get-RsProperty -Object $device -Name 'Status') -eq 'OK') {
+                $state = 'radio on'
+            }
+            $bluetoothText = '{0} ({1})' -f (Format-RsText -Value $deviceName), $state
+            break
         }
-        if ($deviceName -match '(?i)Enumerator|RFCOMM|Personal Area|Service|Profile|Device \(') {
-            continue
-        }
-        $errorCode = 0
-        [void][int]::TryParse([string](Get-RsProperty -Object $device -Name 'ConfigManagerErrorCode'), [ref]$errorCode)
-        $state = 'radio state n/a'
-        if ($errorCode -eq 22) {
-            $state = 'radio off'
-        } elseif ([string](Get-RsProperty -Object $device -Name 'Status') -eq 'OK') {
-            $state = 'radio on'
-            $bluetoothOn = $true
-        }
-        $bluetoothText = '{0} ({1})' -f (Format-RsText -Value $deviceName), $state
-        break
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'bluetooth' -ErrorRecord $_))
+        $bluetoothText = 'n/a'
     }
 
+    $usbText = 'n/a'
+    $comText = 'n/a'
+    $parallelText = 'n/a'
+    $thunderbolt = $false
+    $usbDevices = ConvertTo-RsList
+    $comNames = New-Object System.Collections.Generic.List[string]
+    $comNeeded = $false
+    try {
     $usbNames = New-Object System.Collections.Generic.List[string]
     $usbCounts = @{}
-    $comNames = New-Object System.Collections.Generic.List[string]
     $parallelNames = New-Object System.Collections.Generic.List[string]
-    $usbDevices = ConvertTo-RsList
-    $thunderbolt = $false
     foreach ($controller in @(Get-RsCim -ClassName 'Win32_USBController')) {
+        if ($null -eq $controller) {
+            continue
+        }
         $controllerName = [string](Get-RsProperty -Object $controller -Name 'Name')
         $generation = ConvertTo-RsUsbGeneration -Name $controllerName
         if ($generation -eq 'n/a') {
@@ -2365,6 +3148,9 @@ function Get-RsCollectedSurvey {
         }
     }
     foreach ($entity in @(Get-RsCim -ClassName 'Win32_PnPEntity')) {
+        if ($null -eq $entity) {
+            continue
+        }
         $entityName = [string](Get-RsProperty -Object $entity -Name 'Name')
         $entityId = [string](Get-RsProperty -Object $entity -Name 'PNPDeviceID')
         if ($entityName -match '(?i)Thunderbolt|USB4') {
@@ -2375,17 +3161,28 @@ function Get-RsCollectedSurvey {
         }
     }
     foreach ($com in @(Get-RsCim -ClassName 'Win32_SerialPort')) {
+        if ($null -eq $com) {
+            continue
+        }
         $comName = Format-RsText -Value (Get-RsProperty -Object $com -Name 'DeviceID')
+        $comPnp = [string](Get-RsProperty -Object $com -Name 'PNPDeviceID')
         if ($comName -ne 'n/a') {
             $comNames.Add($comName)
         }
+        if (Test-RsComNeeded -Name $comName -PnpDeviceId $comPnp) {
+            $comNeeded = $true
+        }
     }
     foreach ($deviceName in $usbDevices) {
-        if (Test-RsComDevice -Name ([string]$deviceName)) {
+        if (Test-RsComNeeded -Name ([string]$deviceName) -PnpDeviceId '') {
             $comNames.Add([string]$deviceName)
+            $comNeeded = $true
         }
     }
     foreach ($parallel in @(Get-RsCim -ClassName 'Win32_ParallelPort')) {
+        if ($null -eq $parallel) {
+            continue
+        }
         $parallelName = Format-RsText -Value (Get-RsProperty -Object $parallel -Name 'DeviceID')
         if ($parallelName -eq 'n/a') {
             $parallelName = Format-RsText -Value (Get-RsProperty -Object $parallel -Name 'Name')
@@ -2410,28 +3207,59 @@ function Get-RsCollectedSurvey {
     if ($parallelNames.Count -gt 0) {
         $parallelText = ($parallelNames -join ', ')
     }
-
-    $printerItems = ConvertTo-RsList
-    foreach ($printer in @(Get-RsCim -ClassName 'Win32_Printer')) {
-        $printerName = [string](Get-RsProperty -Object $printer -Name 'Name')
-        if (Test-RsIgnoredPrinter -Name $printerName) {
-            continue
-        }
-        $portName = [string](Get-RsProperty -Object $printer -Name 'PortName')
-        $printerItems.Add([pscustomobject]@{
-            name = (Format-RsText -Value $printerName)
-            kind = (Get-RsPrinterKind -PortName $portName -Network (Get-RsProperty -Object $printer -Name 'Network'))
-            port = (Format-RsText -Value $portName)
-        })
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'ports' -ErrorRecord $_))
+        $usbText = 'n/a'
+        $comText = 'n/a'
+        $parallelText = 'n/a'
+        $thunderbolt = $false
+        $usbDevices = ConvertTo-RsList
+        $comNames = New-Object System.Collections.Generic.List[string]
+        $comNeeded = $false
     }
 
+    $printerItems = ConvertTo-RsList
+    try {
+        foreach ($printer in @(Get-RsCim -ClassName 'Win32_Printer')) {
+            if ($null -eq $printer) {
+                continue
+            }
+            $printerName = [string](Get-RsProperty -Object $printer -Name 'Name')
+            if (Test-RsIgnoredPrinter -Name $printerName) {
+                continue
+            }
+            $portName = [string](Get-RsProperty -Object $printer -Name 'PortName')
+            $printerItems.Add([pscustomobject]@{
+                name = (Format-RsText -Value $printerName)
+                kind = (Get-RsPrinterKind -PortName $portName -Network (Get-RsProperty -Object $printer -Name 'Network'))
+                port = (Format-RsText -Value $portName)
+            })
+        }
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'printers' -ErrorRecord $_))
+        $printerItems = ConvertTo-RsList
+    }
+
+    $caption = 'n/a'
+    $buildText = 'n/a'
+    $membership = 'n/a'
+    $readiness = 'n/a'
+    $serverText = 'n/a'
+    $roleItems = ConvertTo-RsList
+    try {
     $caption = Format-RsText -Value (Get-RsProperty -Object $os -Name 'Caption')
     $buildNumber = 0
     [void][int]::TryParse([string](Get-RsProperty -Object $os -Name 'BuildNumber'), [ref]$buildNumber)
     $productType = 0
     [void][int]::TryParse([string](Get-RsProperty -Object $os -Name 'ProductType'), [ref]$productType)
-    $ubr = Format-RsText -Value (Get-RsRegistryValue -SubKey 'SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name 'UBR')
-    $displayVersion = Format-RsText -Value (Get-RsRegistryValue -SubKey 'SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name 'DisplayVersion')
+    $ubr = 'n/a'
+    $displayVersion = 'n/a'
+    try {
+        $ubr = Format-RsText -Value (Get-RsRegistryValue -SubKey 'SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name 'UBR')
+        $displayVersion = Format-RsText -Value (Get-RsRegistryValue -SubKey 'SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name 'DisplayVersion')
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'operating system' -ErrorRecord $_))
+    }
     $buildText = [string]$buildNumber
     if ($ubr -ne 'n/a') {
         $buildText = '{0}.{1}' -f $buildNumber, $ubr
@@ -2443,7 +3271,12 @@ function Get-RsCollectedSurvey {
     $isWin11 = Test-RsWindows11 -Caption $caption -Build $buildNumber
     $gap = New-Object System.Collections.Generic.List[string]
     if (-not $isServer) {
-        $firmware = [string](Get-RsRegistryValue -SubKey 'SYSTEM\CurrentControlSet\Control' -Name 'PEFirmwareType')
+        $firmware = ''
+        try {
+            $firmware = [string](Get-RsRegistryValue -SubKey 'SYSTEM\CurrentControlSet\Control' -Name 'PEFirmwareType')
+        } catch {
+            $problem.Add((Get-RsSectionError -Section 'operating system' -ErrorRecord $_))
+        }
         if ($firmware -eq '1') {
             $gap.Add('Legacy BIOS')
         }
@@ -2492,40 +3325,97 @@ function Get-RsCollectedSurvey {
             }
         }
     }
-    $software = Find-RsInstalledApp -Entry @(Get-RsUninstallEntry)
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'operating system' -ErrorRecord $_))
+        $caption = 'n/a'
+        $buildText = 'n/a'
+        $membership = 'n/a'
+        $readiness = 'n/a'
+        $serverText = 'n/a'
+        $roleItems = ConvertTo-RsList
+    }
+    $software = ConvertTo-RsList
     $imaging = $false
-    foreach ($app in $software) {
-        if (Test-RsImagingLabel -Label ([string]$app.Label)) {
-            $imaging = $true
+    try {
+        $software = Find-RsInstalledApp -Entry @(Get-RsUninstallEntry)
+        foreach ($app in $software) {
+            if ($null -eq $app) {
+                continue
+            }
+            if (Test-RsImagingLabel -Label ([string]$app.Label)) {
+                $imaging = $true
+            }
         }
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'software' -ErrorRecord $_))
+        $software = ConvertTo-RsList
+        $imaging = $false
     }
 
-    $battery = @(Get-RsCim -ClassName 'Win32_Battery') | Select-Object -First 1
-    $power = 'No battery'
+    $power = 'n/a'
     $batteryHealth = -1
-    if ($null -ne $battery) {
-        $health = Get-RsBatteryHealthPercent -Design (Get-RsProperty -Object $battery -Name 'DesignCapacity') -Full (Get-RsProperty -Object $battery -Name 'FullChargeCapacity')
-        $charge = Format-RsText -Value (Get-RsProperty -Object $battery -Name 'EstimatedChargeRemaining')
-        $healthText = 'n/a'
-        if ($null -ne $health) {
-            $batteryHealth = [int]$health
-            $healthText = [string]$health
+    try {
+        $battery = @(Get-RsCim -ClassName 'Win32_Battery') | Select-Object -First 1
+        $power = 'No battery'
+        if ($null -ne $battery) {
+            $health = Get-RsBatteryHealthPercent -Design (Get-RsProperty -Object $battery -Name 'DesignCapacity') -Full (Get-RsProperty -Object $battery -Name 'FullChargeCapacity')
+            $charge = Format-RsText -Value (Get-RsProperty -Object $battery -Name 'EstimatedChargeRemaining')
+            $healthText = 'n/a'
+            if ($null -ne $health) {
+                $batteryHealth = [int]$health
+                $healthText = [string]$health
+            }
+            $power = 'Battery {0}, health {1} percent, charge {2} percent' -f (Format-RsText -Value (Get-RsProperty -Object $battery -Name 'Name')), $healthText, $charge
         }
-        $power = 'Battery {0}, health {1} percent, charge {2} percent' -f (Format-RsText -Value (Get-RsProperty -Object $battery -Name 'Name')), $healthText, $charge
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'battery' -ErrorRecord $_))
+        $power = 'n/a'
+        $batteryHealth = -1
     }
 
-    $vga = $false
-    foreach ($name in @($reportedNames)) {
-        if ($name -eq 'VGA') {
-            $vga = $true
+    $notes = @()
+    try {
+        $vga = $false
+        foreach ($name in @($reportedNames)) {
+            if ($name -eq 'VGA') {
+                $vga = $true
+            }
         }
-    }
-    foreach ($item in $monitorItems) {
-        if ([string]$item.connection -eq 'VGA') {
-            $vga = $true
+        foreach ($item in $monitorItems) {
+            if ($null -ne $item -and [string]$item.connection -eq 'VGA') {
+                $vga = $true
+            }
         }
+        $formSize = 'n/a'
+        if ($null -ne $form) {
+            $formSize = [string]$form.Size
+        }
+        if ($null -ne $printerItems) {
+            foreach ($printer in $printerItems) {
+                if ($null -eq $printer) {
+                    continue
+                }
+                $printerPort = [string]$printer.port
+                $portInUse = $false
+                if ($printerPort -match '(?i)^COM\d+') {
+                    $portInUse = $true
+                }
+                if (Test-RsComNeeded -Name $printerPort -PnpDeviceId '' -InUse $portInUse) {
+                    $comNeeded = $true
+                }
+            }
+        }
+        $wifiPresent = $false
+        $wifiInUse = $false
+        if ($null -ne $wifiItems -and $wifiItems.Count -gt 0) {
+            $wifiPresent = $true
+            $wifiInUse = Test-RsWifiInUse -Adapter $wifiItems.ToArray()
+        }
+        $notes = @(Get-RsReplacementNote -VideoOutput @($reportedNames) -ExternalMonitor $external -VgaConnected $vga -ComPort $comNeeded -Wifi $wifiPresent -WifiInUse $wifiInUse -DedicatedGpu $dedicated -ImagingSoftware $imaging -FormFactor $formSize -Thunderbolt $thunderbolt -BatteryHealth $batteryHealth)
+    } catch {
+        $problem.Add((Get-RsSectionError -Section 'notes' -ErrorRecord $_))
+        $notes = @()
     }
-    $notes = @(Get-RsReplacementNote -VideoOutput @($reportedNames) -ExternalMonitor $external -VgaConnected $vga -ComPort ($comNames.Count -gt 0) -Wifi ($wifiItems.Count -gt 0) -DedicatedGpu $dedicated -ImagingSoftware $imaging -FormFactor ([string]$form.Size) -Bluetooth $bluetoothOn -Thunderbolt $thunderbolt -BatteryHealth $batteryHealth)
 
     return [pscustomobject]@{
         computer   = (Format-RsText -Value $env:COMPUTERNAME)
@@ -2546,7 +3436,8 @@ function Get-RsCollectedSurvey {
         }
         formFactor = $form
         display    = [pscustomobject]@{
-            reported = (Format-RsPortTally -Type @($reportedNames))
+            reported = (Format-RsPortTally -Type @($reportedNames.ToArray()))
+            physical = (Get-RsPhysicalPort -Gpu @($gpuItems.ToArray()))
             source   = $reportedSource
             gpu      = $gpuItems
         }
@@ -2622,7 +3513,7 @@ function Invoke-RsMain {
             Write-RsSurveyFile -Path $files.TextPath -Content ($summaryText + [Environment]::NewLine)
             Write-RsSurveyFile -Path $files.JsonPath -Content $json
         } catch {
-            $saveError = $_.Exception.Message
+            $saveError = Get-RsSectionError -Section 'files' -ErrorRecord $_
         }
         if (-not [string]::IsNullOrWhiteSpace($saveError)) {
             $survey.result = 'Fail'
@@ -2639,7 +3530,7 @@ function Invoke-RsMain {
         Write-Output $summaryText
         Write-Output $json
     } catch {
-        Write-RsResult -Result Error -Summary $_.Exception.Message
+        Write-RsResult -Result Error -Summary (Get-RsSectionError -Section 'survey' -ErrorRecord $_)
         $script:ScExitCode = 2
     }
 }
@@ -2649,10 +3540,25 @@ if ($MyInvocation.InvocationName -ne '.') {
     try {
         Invoke-RsMain -OutputPath $OutputPath | Out-Host
     } catch {
+        $line = 0
+        if ($null -ne $_.InvocationInfo) {
+            $line = [int]$_.InvocationInfo.ScriptLineNumber
+        }
+        $message = 'n/a'
+        if ($null -ne $_.Exception -and -not [string]::IsNullOrWhiteSpace([string]$_.Exception.Message)) {
+            $message = [string]$_.Exception.Message
+        }
         Write-Output 'RESULT: Error' | Out-Host
-        Write-Output ('Summary: {0}' -f $_.Exception.Message) | Out-Host
+        Write-Output ('Summary: survey: line {0}: {1}' -f $line, $message) | Out-Host
         $script:ScExitCode = 2
     }
-    Write-Output ('EXITCODE: {0}' -f $script:ScExitCode) | Out-Host
-    exit $script:ScExitCode
+    $code = [int]$script:ScExitCode
+    Write-Output ('EXITCODE: {0}' -f $code) | Out-Host
+    $Error.Clear()
+    try {
+        $host.SetShouldExit($code)
+    } catch {
+        Write-Verbose $_.Exception.Message
+    }
+    exit $code
 }

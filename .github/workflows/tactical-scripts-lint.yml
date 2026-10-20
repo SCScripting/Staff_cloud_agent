@@ -1,0 +1,75 @@
+name: Tactical script lint
+
+on:
+  pull_request:
+    paths:
+      - 'tactical-scripts/**'
+      - '.github/workflows/tactical-scripts-lint.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'tactical-scripts/**'
+      - '.github/workflows/tactical-scripts-lint.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PowerShell
+        run: |
+          set -euo pipefail
+          if command -v pwsh >/dev/null 2>&1; then
+            pwsh -NoLogo -Command '$PSVersionTable.PSVersion.ToString()'
+            exit 0
+          fi
+          . /etc/os-release
+          wget -q "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/packages-microsoft-prod.deb" -O /tmp/packages-microsoft-prod.deb
+          sudo dpkg -i /tmp/packages-microsoft-prod.deb
+          sudo apt-get update
+          sudo apt-get install -y powershell
+
+      - name: Install PSScriptAnalyzer and Pester
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+              Register-PSRepository -Default
+          }
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force
+          Install-Module -Name Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $results = @(Invoke-ScriptAnalyzer -Path ./tactical-scripts -Recurse -Severity Error)
+          if ($results.Count -gt 0) {
+              $results | Format-Table -AutoSize | Out-String | Write-Output
+              exit 1
+          }
+          Write-Output 'PSScriptAnalyzer reported no errors.'
+
+      - name: Pester
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $config = New-PesterConfiguration
+          $config.Run.Path = './tactical-scripts/tests'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $config
+
+      - name: Survey collector tests
+        run: |
+          set -euo pipefail
+          python3 -m pip install -r tactical-scripts/collector/requirements.txt
+          python3 -m unittest discover -s tactical-scripts/collector -p 'test_*.py'

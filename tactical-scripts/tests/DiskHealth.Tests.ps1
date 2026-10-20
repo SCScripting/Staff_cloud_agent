@@ -75,6 +75,33 @@ Describe 'Disk health rules' {
         $result.Healthy | Should -BeTrue
     }
 
+    It 'labels a pass that rests only on the Windows health flag' {
+        $blank = Test-DhLimitedData -ReadTotal $null -ReadCorrected $null -ReadUncorrected $null -WriteTotal $null -WriteUncorrected $null -Wear 0
+        $blank | Should -BeTrue
+        Test-DhLimitedData -ReadTotal $null -ReadCorrected '' -ReadUncorrected $null -WriteTotal $null -WriteUncorrected $null -Wear $null | Should -BeTrue
+
+        Test-DhLimitedData -ReadTotal 0 -ReadCorrected 0 -ReadUncorrected 0 -WriteTotal 0 -WriteUncorrected 0 -Wear 0 | Should -BeFalse
+        Test-DhLimitedData -ReadTotal $null -ReadCorrected $null -ReadUncorrected 0 -WriteTotal $null -WriteUncorrected $null -Wear $null | Should -BeFalse
+        Test-DhLimitedData -ReadTotal $null -ReadCorrected $null -ReadUncorrected $null -WriteTotal $null -WriteUncorrected $null -Wear 12 | Should -BeFalse
+
+        Get-DhPassResult -Limited @($true) | Should -Be 'Pass (limited data)'
+        Get-DhPassResult -Limited @($true, $true) | Should -Be 'Pass (limited data)'
+        Get-DhPassResult -Limited @($true, $false) | Should -Be 'Pass'
+        Get-DhPassResult -Limited @($false) | Should -Be 'Pass'
+        $flags = New-Object System.Collections.Generic.List[bool]
+        $flags.Add($true)
+        Get-DhPassResult -Limited @($flags.ToArray()) | Should -Be 'Pass (limited data)'
+
+        $limited = @(Write-DhResult -Result 'Pass (limited data)' -Summary '1 in-scope disks healthy.')
+        $limited[0] | Should -Be 'RESULT: Pass (limited data)'
+        $limited[1] | Should -Be 'Data: limited, only the Windows health flag is available'
+        $limited[2] | Should -Be 'Summary: 1 in-scope disks healthy.'
+
+        $plain = @(Write-DhResult -Result 'Pass' -Summary '1 in-scope disks healthy.')
+        $plain[0] | Should -Be 'RESULT: Pass'
+        $plain[1] | Should -Be 'Summary: 1 in-scope disks healthy.'
+    }
+
     It 'trims trailing dots and spaces from the serial' {
         Format-DhSerial -Serial 'CT500P3SSD8. ' | Should -Be 'CT500P3SSD8'
         Format-DhSerial -Serial '  ABC.  ' | Should -Be 'ABC'

@@ -11,7 +11,10 @@
     the disk. Age uses power-on hours when they are greater than zero, then
     the manufacture date, then MSFT_StorageReliabilityCounter power-on hours,
     then the WMI disk install date, then the OS install date labeled as an
-    estimate. Fails when a disk is unhealthy.
+    estimate. Fails when a disk is unhealthy. A pass whose wear and read/write
+    counters are all n/a prints RESULT: Pass (limited data), because that
+    pass uses only the Windows health flag. A pass with a real counter
+    stays RESULT: Pass. The exit code is still 0.
 
     Parameters:
       -MaxWearPercent    Used SSD life percent that fails the disk. Default 90.
@@ -54,7 +57,7 @@ function Test-DhWindowsHost {
 function Write-DhResult {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Pass', 'Fail', 'Error')]
+        [ValidateSet('Pass', 'Pass (limited data)', 'Fail', 'Error')]
         [string]$Result,
 
         [Parameter(Mandatory = $true)]
@@ -62,6 +65,9 @@ function Write-DhResult {
     )
 
     Write-Output ('RESULT: {0}' -f $Result)
+    if ($Result -eq 'Pass (limited data)') {
+        Write-Output 'Data: limited, only the Windows health flag is available'
+    }
     Write-Output ('Summary: {0}' -f $Summary)
 }
 
@@ -379,6 +385,43 @@ function Format-DhText {
     return $text
 }
 
+function Test-DhLimitedData {
+    param(
+        $ReadTotal,
+        $ReadCorrected,
+        $ReadUncorrected,
+        $WriteTotal,
+        $WriteUncorrected,
+        $Wear
+    )
+
+    if ((Format-DhWear -Wear $Wear) -ne 'n/a') {
+        return $false
+    }
+    foreach ($value in @($ReadTotal, $ReadCorrected, $ReadUncorrected, $WriteTotal, $WriteUncorrected)) {
+        if ((Format-DhText -Value $value) -ne 'n/a') {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-DhPassResult {
+    param([bool[]]$Limited)
+
+    $sawDisk = $false
+    foreach ($item in @($Limited)) {
+        $sawDisk = $true
+        if (-not $item) {
+            return 'Pass'
+        }
+    }
+    if (-not $sawDisk) {
+        return 'Pass'
+    }
+    return 'Pass (limited data)'
+}
+
 function Format-DhWear {
     param($Wear)
 
@@ -580,6 +623,7 @@ function Invoke-DhMain {
         $diskDrives = @(Get-DhDiskDrive)
         $osInstall = Get-DhOsInstallDate
         $checked = 0
+        $limited = New-Object System.Collections.Generic.List[bool]
         $failed = New-Object System.Collections.Generic.List[string]
         $index = 0
         foreach ($raw in $rawDisks) {
@@ -602,7 +646,10 @@ function Invoke-DhMain {
                 $friendly = 'Disk ' + $index
             }
 
+            $readTotal = Get-DhProperty -Object $counter -Name 'ReadErrorsTotal'
+            $readCorrected = Get-DhProperty -Object $counter -Name 'ReadErrorsCorrected'
             $readUncorrected = Get-DhProperty -Object $counter -Name 'ReadErrorsUncorrected'
+            $writeTotal = Get-DhProperty -Object $counter -Name 'WriteErrorsTotal'
             $writeUncorrected = Get-DhProperty -Object $counter -Name 'WriteErrorsUncorrected'
             $wear = Get-DhProperty -Object $counter -Name 'Wear'
             $applyWear = ($kind -eq 'SSD')
@@ -610,6 +657,7 @@ function Invoke-DhMain {
             $evaluationText = 'not checked'
             if ($inScope) {
                 $checked++
+                $limited.Add((Test-DhLimitedData -ReadTotal $readTotal -ReadCorrected $readCorrected -ReadUncorrected $readUncorrected -WriteTotal $writeTotal -WriteUncorrected $writeUncorrected -Wear $wear))
                 $evaluation = Test-DhDiskState -HealthStatus $health -OperationalStatus $ops -ReadErrorsUncorrected $readUncorrected -WriteErrorsUncorrected $writeUncorrected -Wear $wear -ApplyWear $applyWear -MaxWearPercent $MaxWearPercent
                 if ($evaluation.Healthy) {
                     $evaluationText = 'Pass'
@@ -632,10 +680,10 @@ function Invoke-DhMain {
             Write-Output ('  Firmware: {0}' -f (Format-DhText -Value (Get-DhProperty -Object $raw -Name 'FirmwareVersion')))
             Write-Output ('  HealthStatus: {0}' -f (Format-DhText -Value $health))
             Write-Output ('  OperationalStatus: {0}' -f ($(if ($ops.Count -eq 0) { 'n/a' } else { $ops -join ', ' })))
-            Write-Output ('  ReadErrorsTotal: {0}' -f (Format-DhText -Value (Get-DhProperty -Object $counter -Name 'ReadErrorsTotal')))
-            Write-Output ('  ReadErrorsCorrected: {0}' -f (Format-DhText -Value (Get-DhProperty -Object $counter -Name 'ReadErrorsCorrected')))
+            Write-Output ('  ReadErrorsTotal: {0}' -f (Format-DhText -Value $readTotal))
+            Write-Output ('  ReadErrorsCorrected: {0}' -f (Format-DhText -Value $readCorrected))
             Write-Output ('  ReadErrorsUncorrected: {0}' -f (Format-DhText -Value $readUncorrected))
-            Write-Output ('  WriteErrorsTotal: {0}' -f (Format-DhText -Value (Get-DhProperty -Object $counter -Name 'WriteErrorsTotal')))
+            Write-Output ('  WriteErrorsTotal: {0}' -f (Format-DhText -Value $writeTotal))
             Write-Output ('  WriteErrorsUncorrected: {0}' -f (Format-DhText -Value $writeUncorrected))
             Write-Output ('  WearPercent: {0}' -f (Format-DhWear -Wear $wear))
             Write-Output ('  TemperatureC: {0}' -f (Format-DhText -Value (Get-DhProperty -Object $counter -Name 'Temperature')))
@@ -659,7 +707,8 @@ function Invoke-DhMain {
             $script:ScExitCode = 1
             return
         }
-        Write-DhResult -Result Pass -Summary ('{0} in-scope disks healthy.' -f $checked)
+        $passResult = Get-DhPassResult -Limited @($limited.ToArray())
+        Write-DhResult -Result $passResult -Summary ('{0} in-scope disks healthy.' -f $checked)
         $script:ScExitCode = 0
     } catch {
         Write-DhResult -Result Error -Summary $_.Exception.Message

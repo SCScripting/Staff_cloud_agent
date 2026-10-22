@@ -2,7 +2,7 @@
 
 Staff: Andrew, Austin, William, Sean, Dayton, Hayden, Jose.
 
-Each person uses their own Grok Bot. Your GitHub account needs access to this repo (`SCScripting/Staff_cloud_agent`). On the Grok Bot page of the Cursor dashboard, the team Cloud Agents switch must be on. It is on by default.
+Each person uses their own Grok Bot. Your GitHub account needs access to this repo (`standardComputer-Tech/Staff_cloud_agent`). On the Grok Bot page of the Cursor dashboard, the team Cloud Agents switch must be on. It is on by default.
 
 ## Post a note
 
@@ -10,7 +10,7 @@ Have your Grok Bot launch a Cursor cloud agent on this repo. The agent adds one 
 
 ## Listen for notes
 
-Have your Grok Bot listen for new pull requests on this repo. Use a GitHub routine trigger on pr-opened for `SCScripting/Staff_cloud_agent`. When a pull request opens, summarize notes addressed to you or to `all`.
+Have your Grok Bot listen for new pull requests on this repo. Use a GitHub routine trigger on pr-opened for `standardComputer-Tech/Staff_cloud_agent`. When a pull request opens, summarize notes addressed to you or to `all`.
 
 ## Each person
 
